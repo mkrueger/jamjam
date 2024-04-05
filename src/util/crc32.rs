@@ -1,6 +1,8 @@
+pub const CRC_SEED: u32 = 0xFFFF_FFFF;
+
 #[must_use]
 pub fn get_crc32(buf: &[u8]) -> u32 {
-    let mut result = 0xFFFF_FFFF;
+    let mut result = CRC_SEED;
     let mut buf = buf;
     while buf.len() >= 16 {
         result = CRC32_TABLE[0x0][buf[0xf] as usize]
