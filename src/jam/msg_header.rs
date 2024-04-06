@@ -9,9 +9,10 @@ use crate::{
     util::crc32::CRC_SEED,
 };
 
-use super::MessageBase;
+use super::JamMessageBase;
 
-pub struct MessageHeader {
+#[derive(Clone)]
+pub struct JamMessageHeader {
     /// <J><A><M> followed by <NUL>
     //pub signature: u32,
 
@@ -65,23 +66,23 @@ pub struct MessageHeader {
     /// Next msg in reply chain
     pub replynext: u32,
 
-    /// When msg was written
+    /// When msg was written (UNIX time)
     pub date_written: u32,
 
-    /// When msg was read by recipient
+    /// When msg was read by recipient (UNIX time)
     pub date_received: u32,
 
-    /// When msg was processed by tosser/scanner
+    /// When msg was processed by tosser/scanner (UNIX time)
     pub date_processed: u32,
 
     /// Message number (1-based)
     pub message_number: u32,
 
     /// Msg attribute, see "Msg Attributes"
-    pub attribute: u32,
+    pub attributes: u32,
 
     /// Reserved for future use
-    pub attribute2: u32,
+    pub attributes2: u32,
 
     /// Offset of text in ????????.JDT file
     pub offset: u32,
@@ -97,7 +98,31 @@ pub struct MessageHeader {
     pub cost: u32,
 }
 
-impl MessageHeader {
+impl Default for JamMessageHeader {
+    fn default() -> Self {
+        Self {
+            sub_fields: Vec::new(),
+            times_read: 0,
+            msgid_crc: CRC_SEED,
+            replycrc: CRC_SEED,
+            reply_to: 0,
+            reply1st: 0,
+            replynext: 0,
+            date_written: 0,
+            date_received: 0,
+            date_processed: 0,
+            message_number: 0,
+            attributes: 0,
+            attributes2: 0,
+            offset: 0,
+            txt_len: 0,
+            password_crc: CRC_SEED,
+            cost: 0,
+        }
+    }
+}
+
+impl JamMessageHeader {
     pub const FIXED_HEADER_SIZE: usize = 76;
 
     pub fn get_subject(&self) -> Option<String> {
@@ -134,7 +159,7 @@ impl MessageHeader {
 
     /// Checks if a password is valid.
     pub fn is_password_valid(&self, password: &str) -> bool {
-        self.password_crc == CRC_SEED || self.password_crc == MessageBase::get_crc(password)
+        self.password_crc == CRC_SEED || self.password_crc == JamMessageBase::get_crc(password)
     }
 
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
@@ -192,8 +217,8 @@ impl MessageHeader {
             date_received,
             date_processed,
             message_number,
-            attribute,
-            attribute2,
+            attributes: attribute,
+            attributes2: attribute2,
             offset,
             txt_len,
             password_crc,
@@ -223,8 +248,8 @@ impl MessageHeader {
         file.write_all(&self.date_received.to_le_bytes())?;
         file.write_all(&self.date_processed.to_le_bytes())?;
         file.write_all(&self.message_number.to_le_bytes())?;
-        file.write_all(&self.attribute.to_le_bytes())?;
-        file.write_all(&self.attribute2.to_le_bytes())?;
+        file.write_all(&self.attributes.to_le_bytes())?;
+        file.write_all(&self.attributes2.to_le_bytes())?;
         file.write_all(&self.offset.to_le_bytes())?;
         file.write_all(&self.txt_len.to_le_bytes())?;
         file.write_all(&self.password_crc.to_le_bytes())?;
@@ -239,7 +264,7 @@ impl MessageHeader {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SubfieldType {
     /// Unknown subfield type
     Unknown(u32),
@@ -430,6 +455,7 @@ impl From<SubfieldType> for u32 {
     }
 }
 
+#[derive(Clone)]
 pub struct MessageSubfield {
     field_type: SubfieldType,
     buffer: Vec<u8>,

@@ -6,14 +6,14 @@ use std::{
 use crate::convert_u32;
 
 #[derive(Default, Debug)]
-pub struct LastReadStorage {
+pub struct JamLastReadStorage {
     pub user_crc: u32,      // CRC-32 of user name (lowercase)   (1)
     pub user_id: u32,       // Unique UserID
     pub last_read_msg: u32, // Last read message number
     pub high_read_msg: u32, // Highest read message number
 }
 
-impl LastReadStorage {
+impl JamLastReadStorage {
     const LAST_READ_SIZE: usize = 16;
 
     pub fn load(file: &mut BufReader<File>) -> crate::Result<Self> {

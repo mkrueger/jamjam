@@ -57,6 +57,7 @@ pub fn u32_to_basicreal(n: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use crate::util::basic_real::{basicreal_to_u32, u32_to_basicreal};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_basicreal_conversion() {

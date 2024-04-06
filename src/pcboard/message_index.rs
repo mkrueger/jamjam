@@ -3,10 +3,13 @@ use std::{
     io::{BufReader, Read},
 };
 
-use crate::{convert_to_string, convert_u16, convert_u32, convert_u8, pcboard::convert_str};
+use crate::{
+    convert_to_string, convert_u16, convert_u32, convert_u8,
+    pcboard::{convert_str, FROM_TO_LEN},
+};
 
 #[derive(Clone, Debug)]
-pub struct MessageIndex {
+pub struct PCBoardMessageIndex {
     pub offset: u32,
     pub num: u32,
     pub to: String,
@@ -16,7 +19,7 @@ pub struct MessageIndex {
     pub reserved: [u8; 3],
 }
 
-impl MessageIndex {
+impl PCBoardMessageIndex {
     pub const HEADER_SIZE: usize = 4 + 4 + 25 + 25 + 1 + 2 + 3;
 
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
@@ -26,8 +29,8 @@ impl MessageIndex {
 
         convert_u32!(offset, data);
         convert_u32!(num, data);
-        convert_to_string!(to, data, 25);
-        convert_to_string!(from, data, 25);
+        convert_to_string!(to, data, FROM_TO_LEN);
+        convert_to_string!(from, data, FROM_TO_LEN);
         convert_u8!(status, data);
         convert_u16!(date, data);
         let reserved = [data[0], data[1], data[2]];
@@ -42,6 +45,7 @@ impl MessageIndex {
             reserved,
         })
     }
+
     /*
     pub fn load(file: &str) -> crate::Result<Vec<Self>> {
         let buf = fs::read(file)?;

@@ -21,3 +21,14 @@ JAM(mbp) - Copyright 1993 Joaquim Homrighausen, Andrew Milner,
                                ALL RIGHTS RESERVED.
 
 Note that jamjam doesn't contain any 3rd party source code but took some source code comments out of the official JAM (JAM.txt) document.
+
+## PCBoard
+
+This message format is only used inside PCBoard - an old bulettin board system. This format is the base of the more well known QWK standard. The QWK format inherits some funny things from that - for example the 'password' field which is only used by PCBoad AFAIK.
+
+It's only the goal to read/understand the PCBoard format for convert it to something else. I don't bother/mind writing update routines for that. However the format is documented and feel free to add it :).
+
+
+## More formats are awaiting
+
+Maybe Squish next?

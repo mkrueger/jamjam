@@ -1,36 +1,184 @@
+use chrono::{Datelike, Local, NaiveTime};
+
 use super::convert_str;
-use crate::{convert_to_string, convert_u32, convert_u8, util::basic_real::basicreal_to_u32};
+use crate::{
+    convert_to_string, convert_u32, convert_u8,
+    pcboard::{DATE_LEN, FROM_TO_LEN, PASSWORD_LEN, TIME_LEN},
+    util::basic_real::basicreal_to_u32,
+};
 use std::{
     fs::File,
     io::{BufReader, Read},
     str::FromStr,
 };
 
+pub enum MessageType {
+    Public,
+    Receiver,
+    Comment,
+    SenderPassword,
+    GroupPassword,
+}
+
 #[derive(Clone, Debug)]
-pub struct MessageHeader {
+pub struct PCBoardMessageHeader {
+    /// Message status flags
+    /// # Remarks
+    /// Not Read | Read | Type
+    /// ---------|------|---------------
+    /// '*'      | '+'  | Private
+    /// '~'      | '`'  | Comment to Sysop
+    /// '%'      | '^'  | Sender password
+    /// '!'      | '#'  | Group password
+    /// ' '      | '-'  | Public
+    /// '$'      | NA   | Group password, public
     pub status: u8,
+
+    /// Message number
     pub msg_number: u32,
-    pub ref_number: u32,
+
+    /// Message replied to (or referenced?)
+    pub reply_to: u32,
+
+    /// Number of 128 byte blocks including message header
     pub num_blocks: u8,
-    pub date: String,
-    pub time: String,
+
+    /// Date & time (MM-DD-YYHH:MM)
+    pub date_time: String,
+
+    /// 25 character "To" field
     pub to_field: String,
+
+    /// Date as number YYMMDD
     pub reply_date: u32,
+
+    /// Reply Time (HH:MM)
     pub reply_time: String,
+
+    /// 'R' == repliey, ' ' == no reply
     pub reply_status: u8,
+
+    /// 25 character "From" field
     pub from_field: String,
+
+    /// 25 character "Subj" field
     pub subj_field: String,
+
+    /// 12 character "Password" in plain text
     pub password: String,
+
+    /// 225 == active, 226 == deleted
     pub active_flag: u8,
+
+    /// Echo flag == 'E'
     pub echo_flag: u8,
-    pub reserved: u32,
+    pub reserved: [u8; 4],
+
+    /// Flags indicating extended header status
+    ///
     pub extended_status: u8,
+
+    /// Either '*' which means the message is a netmail message or 0
+    /// Haven't encountered ' ' yet
     pub net_tag: u8,
 }
 
-impl MessageHeader {
-    pub const HEADER_SIZE: usize =
-        1 + 4 + 4 + 1 + 8 + 5 + 25 + 4 + 5 + 1 + 25 + 25 + 8 + 1 + 1 + 4 + 1 + 1;
+mod extended_status {
+    /// Extended header 'TO' is defined
+    pub const TO: u8 = 1;
+    /// Extended header 'FROM' is defined
+    pub const FROM: u8 = 2;
+    /// Extended header 'SUBJECT' is defined
+    pub const SUBJ: u8 = 4;
+    /// Extended header 'LIST' is defined
+    pub const LIST: u8 = 8;
+    /// Extended header 'ATTACH' is defined
+    pub const ATTACH: u8 = 16;
+    /// Extended header 'REQRR' is defined
+    pub const REQRR: u8 = 64;
+
+    // 128 is undefined ?
+}
+
+pub const MSG_ACTIVE: u8 = 225;
+pub const MSG_INACTIVE: u8 = 226;
+
+pub const ECHO: u8 = b'E';
+pub const NOECHO: u8 = b' ';
+
+pub const REPLIED: u8 = b'R';
+pub const NOT_REPLIED: u8 = b' ';
+
+impl PCBoardMessageHeader {
+    pub const HEADER_SIZE: usize = 128;
+    /*
+    pub get_status(&self) -> MessageType {
+        match self.status {
+            b'~' | b'*' => MessageStatus::PrivateUnread,
+            b'`' | b'+' => MessageStatus::PrivateRead,
+            b' ' => MessageStatus::PublicRead,
+            b'-' => MessageStatus::PublicUnread,
+            _ => MessageStatus::Unknown,
+        }
+    }*/
+
+    /// Returns the date and time of the message
+    ///
+    /// # Remarks
+    /// Returns default, in case of incorrect date
+    pub fn date_time(&self) -> chrono::naive::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(&self.date_time, "%m-%d-%y%H:%M").unwrap_or_default()
+    }
+
+    /// Returns the date and time of the reply
+    /// The century is guessed from the current one. If the year is greater than the current year, it is assumed to be the previous century.
+    ///
+    /// # Remarks
+    /// Returns default, in case of incorrect date
+    pub fn reply_date_time(&self) -> chrono::naive::NaiveDateTime {
+        let time = NaiveTime::parse_from_str(&self.reply_time, "%H:%M").unwrap_or_default();
+
+        let now = Local::now();
+        let century = (now.year() / 100) * 100;
+        let mut year = (self.reply_date / 10000) as i32 + century;
+        if year > now.year() {
+            year -= 100;
+        }
+
+        let month = (self.reply_date % 10000) / 100;
+        let day = self.reply_date % 100;
+
+        let date = chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap_or_default();
+        chrono::NaiveDateTime::new(date, time)
+    }
+
+    pub fn has_to(&self) -> bool {
+        self.extended_status & extended_status::TO != 0
+    }
+
+    pub fn has_from(&self) -> bool {
+        self.extended_status & extended_status::FROM != 0
+    }
+
+    pub fn has_subject(&self) -> bool {
+        self.extended_status & extended_status::SUBJ != 0
+    }
+
+    pub fn has_list(&self) -> bool {
+        self.extended_status & extended_status::LIST != 0
+    }
+
+    pub fn has_attach(&self) -> bool {
+        self.extended_status & extended_status::ATTACH != 0
+    }
+
+    pub fn has_reqrr(&self) -> bool {
+        self.extended_status & extended_status::REQRR != 0
+    }
+
+    pub fn replied(&self) -> bool {
+        self.reply_status == REPLIED
+    }
 
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
         let data = &mut [0; Self::HEADER_SIZE];
@@ -41,29 +189,31 @@ impl MessageHeader {
         convert_u32!(msg_number, data);
         let msg_number = basicreal_to_u32(msg_number);
         convert_u32!(ref_number, data);
+        let ref_number = basicreal_to_u32(ref_number);
         convert_u8!(num_blocks, data);
-        convert_to_string!(date, data, 8);
-        convert_to_string!(time, data, 5);
-        convert_to_string!(to_field, data, 25);
+        convert_to_string!(date_time, data, DATE_LEN + TIME_LEN);
+        convert_to_string!(to_field, data, FROM_TO_LEN);
         convert_u32!(reply_date, data);
-        convert_to_string!(reply_time, data, 5);
+        let reply_date = basicreal_to_u32(reply_date);
+
+        convert_to_string!(reply_time, data, TIME_LEN);
         convert_u8!(reply_status, data);
-        convert_to_string!(from_field, data, 25);
-        convert_to_string!(subj_field, data, 25);
-        convert_to_string!(password, data, 8);
+        convert_to_string!(from_field, data, FROM_TO_LEN);
+        convert_to_string!(subj_field, data, FROM_TO_LEN);
+        convert_to_string!(password, data, PASSWORD_LEN);
         convert_u8!(active_flag, data);
         convert_u8!(echo_flag, data);
-        convert_u32!(reserved, data);
+        let reserved = [data[0], data[1], data[2], data[3]];
+        data = &data[4..];
         convert_u8!(extended_status, data);
         convert_u8!(net_tag, data);
 
         Ok(Self {
             status,
             msg_number,
-            ref_number,
+            reply_to: ref_number,
             num_blocks,
-            date,
-            time,
+            date_time,
             to_field,
             reply_date,
             reply_time,
@@ -77,6 +227,10 @@ impl MessageHeader {
             extended_status,
             net_tag,
         })
+    }
+
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.active_flag != MSG_ACTIVE
     }
 }
 
@@ -149,16 +303,21 @@ impl ExtendedHeaderInformation {
     }
 }
 
-pub struct ExtendedHeader {
+pub struct PCBoardExtendedHeader {
     pub info: ExtendedHeaderInformation,
     pub content: String,
+    /// 'N' == none, 'R' == read
     pub status: u8,
 }
 
-impl ExtendedHeader {
+impl PCBoardExtendedHeader {
     // const ID:u16 = 0x40FF;
     const FUNC_LEN: usize = 7;
     const DESC_LEN: usize = 60;
+
+    pub fn read(&self) -> bool {
+        self.status == b'R'
+    }
 
     pub fn deserialize(buf: &[u8]) -> crate::Result<Self> {
         // let _id = u16::from_le_bytes([buf[0], buf[1]]);

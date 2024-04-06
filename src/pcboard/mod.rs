@@ -1,6 +1,6 @@
 use std::{
-    fs::{self, File},
-    io::{BufReader, Read, Seek},
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, BufWriter, Read, Seek},
     path::{Path, PathBuf},
 };
 
@@ -9,23 +9,22 @@ use thiserror::Error;
 use crate::{convert_u32, util::basic_real::basicreal_to_u32};
 
 use self::{
-    base_header::MessageBaseHeader,
-    message_header::{ExtendedHeader, MessageHeader},
-    message_index::MessageIndex,
+    base_header::PCBoardMessageBaseHeader,
+    message_header::{PCBoardExtendedHeader, PCBoardMessageHeader},
+    message_index::PCBoardMessageIndex,
 };
 
 mod base_header;
-mod message_header;
+pub mod message_header;
 mod message_index;
 
 #[cfg(test)]
 mod tests;
 
-/*
 const FROM_TO_LEN: usize = 25;
 const PASSWORD_LEN: usize = 12;
 const DATE_LEN: usize = 8;
-const TIME_LEN: usize = 5;*/
+const TIME_LEN: usize = 5;
 
 #[derive(Error, Debug)]
 pub enum PCBoardError {
@@ -71,17 +70,17 @@ fn _gen_string(str: &str, num: usize) -> Vec<u8> {
     buf
 }
 
-pub struct Message {
-    pub header: MessageHeader,
-    pub extended_header: Vec<ExtendedHeader>,
+pub struct PCBoardMessage {
+    pub header: PCBoardMessageHeader,
+    pub extended_header: Vec<PCBoardExtendedHeader>,
     pub text: String,
 }
 
-impl Message {
+impl PCBoardMessage {
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
         let mut text = String::new();
 
-        let header = MessageHeader::read(file)?;
+        let header = PCBoardMessageHeader::read(file)?;
 
         let mut buf = vec![0; 128 * ((header.num_blocks as usize).saturating_sub(1))];
         file.read_exact(&mut buf)?;
@@ -90,19 +89,34 @@ impl Message {
         let mut extended_header = Vec::new();
         while i < buf.len() {
             if buf[i] == 0xFF && buf[i + 1] == 0x40 {
-                extended_header.push(ExtendedHeader::deserialize(&buf[i..])?);
+                extended_header.push(PCBoardExtendedHeader::deserialize(&buf[i..])?);
                 i += 0x48;
                 continue;
             }
             text = Self::convert_msg(&buf[i..]);
             break;
         }
-
-        Ok(Message {
+        Ok(PCBoardMessage {
             header,
             extended_header,
             text,
         })
+    }
+
+    pub fn get_status(&self) -> MessageStatus {
+        match self.header.status {
+            b'*' | b'+' => MessageStatus::Private,
+            b'~' | b'`' => MessageStatus::CommentToSysop,
+            b'%' | b'^' => MessageStatus::SenderPassword,
+            b'!' | b'#' => MessageStatus::GroupPassword,
+            b' ' | b'-' => MessageStatus::Public,
+            b'$' => MessageStatus::GroupPasswordMessageToAll,
+            _ => MessageStatus::Public,
+        }
+    }
+
+    pub fn is_read(&self) -> bool {
+        b"+~`^#-".contains(&self.header.status)
     }
 
     fn convert_msg(buf: &[u8]) -> String {
@@ -119,21 +133,59 @@ impl Message {
         }
         str
     }
+
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.header.is_deleted()
+    }
 }
 
-pub struct MessageBase {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageStatus {
+    Private,
+    CommentToSysop,
+    Public,
+
+    SenderPassword,
+
+    GroupPassword,
+    GroupPasswordMessageToAll,
+}
+
+pub struct PCBoardMessageBase {
     file_name: PathBuf,
-    header_info: MessageBaseHeader,
+    header_info: PCBoardMessageBaseHeader,
 }
 
-impl MessageBase {
+impl PCBoardMessageBase {
     /// opens an existing message base with base path (without any extension)
     pub fn open<P: AsRef<Path>>(file_name: P) -> crate::Result<Self> {
-        let header_info = MessageBaseHeader::load(&mut File::open(&file_name)?)?;
+        let header_info = PCBoardMessageBaseHeader::load(&mut File::open(&file_name)?)?;
         Ok(Self {
             file_name: file_name.as_ref().into(),
             header_info,
         })
+    }
+
+    fn write_base_header(&self) -> crate::Result<()> {
+        let header_file = OpenOptions::new().write(true).open(&self.file_name)?;
+        let mut writer = BufWriter::new(header_file);
+        self.header_info.write_header_to(&mut writer)?;
+        Ok(())
+    }
+
+    pub fn is_locked(&mut self) -> crate::Result<bool> {
+        self.header_info = PCBoardMessageBaseHeader::load(&mut File::open(&self.file_name)?)?;
+        Ok(self.header_info.is_locked())
+    }
+
+    pub fn lock(&mut self) -> crate::Result<()> {
+        self.header_info.lock();
+        self.write_base_header()
+    }
+
+    pub fn unlock(&mut self) -> crate::Result<()> {
+        self.header_info.unlock();
+        self.write_base_header()
     }
 
     /// Number of active (not deleted) msgs  
@@ -153,7 +205,7 @@ impl MessageBase {
         self.header_info.callers
     }
 
-    pub fn read_message(&self, num: u32) -> crate::Result<Message> {
+    pub fn read_message(&self, num: u32) -> crate::Result<PCBoardMessage> {
         if num < self.lowest_message_number() || num > self.highest_message_number() {
             return Err(PCBoardError::MessageNumberOutOfRange(
                 num,
@@ -165,12 +217,12 @@ impl MessageBase {
         let idx_file_name = self.file_name.with_extension(extensions::INDEX);
         let mut reader = BufReader::new(File::open(idx_file_name)?);
         reader.seek(std::io::SeekFrom::Start(
-            (num as u64 - 1) * MessageIndex::HEADER_SIZE as u64,
+            (num as u64 - 1) * PCBoardMessageIndex::HEADER_SIZE as u64,
         ))?;
-        let header = MessageIndex::read(&mut reader)?;
+        let header = PCBoardMessageIndex::read(&mut reader)?;
         let mut file = BufReader::new(File::open(&self.file_name)?);
         file.seek(std::io::SeekFrom::Start(header.offset as u64))?;
-        Message::read(&mut file)
+        PCBoardMessage::read(&mut file)
     }
 
     pub fn read_old_index(&self) -> crate::Result<Vec<u32>> {
@@ -192,16 +244,44 @@ impl MessageBase {
         Ok(res)
     }
 
-    pub fn read_index(&self) -> crate::Result<Vec<MessageIndex>> {
+    pub fn read_index(&self) -> crate::Result<Vec<PCBoardMessageIndex>> {
         let idx_file_name = self.file_name.with_extension(extensions::INDEX);
 
         let mut res = Vec::new();
         let mut reader = BufReader::new(File::open(idx_file_name)?);
 
-        while let Ok(header) = MessageIndex::read(&mut reader) {
+        while let Ok(header) = PCBoardMessageIndex::read(&mut reader) {
             res.push(header);
         }
 
         Ok(res)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = crate::Result<PCBoardMessage>> {
+        let idx_file_name = self.file_name.clone();
+        let mut f = File::open(idx_file_name).unwrap();
+        f.seek(std::io::SeekFrom::Start(128)).unwrap();
+        PCBoardMessageIter {
+            reader: BufReader::new(f),
+        }
+    }
+}
+
+struct PCBoardMessageIter {
+    reader: BufReader<File>,
+}
+
+impl Iterator for PCBoardMessageIter {
+    type Item = crate::Result<PCBoardMessage>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Ok(left) = self.reader.has_data_left() {
+            if !left {
+                return None;
+            }
+            Some(PCBoardMessage::read(&mut self.reader))
+        } else {
+            None
+        }
     }
 }

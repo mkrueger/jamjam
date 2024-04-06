@@ -1,18 +1,21 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs::File, io::Read};
 
+use chrono::NaiveDateTime;
+use rand::random;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use thiserror::Error;
 
 use crate::util::crc32::{self, CRC_SEED};
+use crate::util::echmoail::EchomailAddress;
 use crate::{convert_single_u32, convert_u32};
 
 use self::jhr_header::JHRHeaderInfo;
-use self::last_read_storage::LastReadStorage;
-use self::msg_header::MessageHeader;
+use self::last_read_storage::JamLastReadStorage;
+use self::msg_header::{JamMessageHeader, MessageSubfield, SubfieldType};
 
 pub mod jhr_header;
 pub mod last_read_storage;
@@ -55,14 +58,14 @@ mod extensions {
 
 const JAM_SIGNATURE: [u8; 4] = [b'J', b'A', b'M', 0];
 
-pub struct MessageBase {
+pub struct JamMessageBase {
     file_name: PathBuf,
     header_info: JHRHeaderInfo,
     last_read_record: i32,
     is_locked: bool,
 }
 
-impl MessageBase {
+impl JamMessageBase {
     /// opens an existing message base with base path (without any extension)
     pub fn open<P: AsRef<Path>>(file_name: P) -> crate::Result<Self> {
         let header_file_name = file_name.as_ref().with_extension(extensions::HEADER_DATA);
@@ -171,22 +174,20 @@ impl MessageBase {
     ///
     /// This is the lowercase z-modem crc32
     pub fn get_crc(str: &str) -> u32 {
-        crc32::get_crc32(str.to_ascii_lowercase().as_bytes())
+        let crc = crc32::get_crc32(str.to_ascii_lowercase().as_bytes());
+        crc ^ CRC_SEED
     }
 
-    /// Writes a message header + text directly
-    /// Note that this is a dangerous operation, as it does not update the jhr header.
-    /// `write_jhr_header` needs to be called after all messages are written.
-    pub fn write_message(&mut self, mut header: MessageHeader, text: &str) -> crate::Result<()> {
+    pub fn write_message(&mut self, message: &JamMessage) -> crate::Result<()> {
+        let mut header = message.create_jam_header();
         let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
         let mut text_file = OpenOptions::new().append(true).open(text_file_name)?;
-        header.message_number = self.header_info.base_msg_num + self.header_info.active_msgs;
-        let now = SystemTime::now();
-        let unix_time = now.duration_since(UNIX_EPOCH)?;
-        header.date_written = unix_time.as_secs() as u32;
+
+        self.header_info.active_msgs = self.header_info.active_msgs.max(header.message_number);
+
         header.offset = text_file.metadata()?.len() as u32;
-        header.txt_len = text.len() as u32;
-        text_file.write_all(text.as_bytes())?;
+        header.txt_len = message.get_text().len() as u32;
+        text_file.write_all(message.get_text().as_bytes())?;
 
         let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
         let header_file = OpenOptions::new().append(true).open(header_path)?;
@@ -195,11 +196,9 @@ impl MessageBase {
         let mut writer = BufWriter::new(header_file);
         header.write(&mut writer)?;
         writer.flush()?;
-        self.header_info.active_msgs += 1;
 
         let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
         let mut index_file = OpenOptions::new().append(true).open(index_file_name)?;
-
         let crc = if let Some(to) = header.get_to() {
             Self::get_crc(&to)
         } else {
@@ -207,7 +206,6 @@ impl MessageBase {
         };
         index_file.write_all(&crc.to_le_bytes())?;
         index_file.write_all(&message_header_offset.to_le_bytes())?;
-
         Ok(())
     }
 
@@ -216,6 +214,7 @@ impl MessageBase {
         let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
         let header_file = OpenOptions::new().write(true).open(header_path)?;
         let mut writer = BufWriter::new(header_file);
+        println!("header info : {} ", self.header_info.active_msgs);
         self.header_info.update(&mut writer)?;
         writer.flush()?;
         Ok(())
@@ -230,7 +229,7 @@ impl MessageBase {
         Ok(())
     }
 
-    pub fn get_msg_text(&self, header: &MessageHeader) -> crate::Result<String> {
+    pub fn read_msg_text(&self, header: &JamMessageHeader) -> crate::Result<String> {
         let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
         let mut text_file = File::open(text_file_name)?;
         text_file.seek(SeekFrom::Start(header.offset as u64))?;
@@ -249,20 +248,19 @@ impl MessageBase {
         Ok(res)
     }
 
-    pub fn read_headers(&self) -> crate::Result<Vec<MessageHeader>> {
+    pub fn read_headers(&self) -> crate::Result<Vec<JamMessageHeader>> {
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let header_file = File::open(header_file_name)?;
         let mut reader = BufReader::new(header_file);
         reader.seek(SeekFrom::Start(JHRHeaderInfo::JHR_HEADER_SIZE))?;
         let mut res = Vec::new();
-        while let Ok(header) = MessageHeader::read(&mut reader) {
+        while let Ok(header) = JamMessageHeader::read(&mut reader) {
             res.push(header);
         }
         Ok(res)
     }
 
-    pub fn get_header(&self, header_number: u32) -> crate::Result<MessageHeader> {
-        let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
+    pub fn read_header(&self, header_number: u32) -> crate::Result<JamMessageHeader> {
         if header_number < self.header_info.base_msg_num
             || header_number > self.header_info.active_msgs
         {
@@ -281,18 +279,19 @@ impl MessageBase {
         let mut offset = [0; 4];
         index_file.read_exact(&mut offset)?;
         let offset = u32::from_le_bytes(offset);
+        let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let mut header_file = File::open(header_file_name)?;
         header_file.seek(SeekFrom::Start(offset as u64))?;
         let mut reader = BufReader::new(header_file);
-        MessageHeader::read(&mut reader)
+        JamMessageHeader::read(&mut reader)
     }
 
-    pub fn read_last_read_file(&self) -> crate::Result<Vec<LastReadStorage>> {
+    pub fn read_last_read_file(&self) -> crate::Result<Vec<JamLastReadStorage>> {
         let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
         let last_read_file = File::open(last_read_file_name)?;
         let mut res = Vec::new();
         let mut reader = BufReader::new(last_read_file);
-        while let Ok(last_read) = LastReadStorage::load(&mut reader) {
+        while let Ok(last_read) = JamLastReadStorage::load(&mut reader) {
             res.push(last_read);
         }
         Ok(res)
@@ -302,7 +301,7 @@ impl MessageBase {
         &mut self,
         user_name_crc: u32,
         id: u32,
-    ) -> crate::Result<Option<LastReadStorage>> {
+    ) -> crate::Result<Option<JamLastReadStorage>> {
         let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
         let file = File::open(last_read_file_name)?;
         let mut reader = BufReader::new(file);
@@ -328,7 +327,7 @@ impl MessageBase {
                 let mut data_c = &data[8..];
                 convert_u32!(last_read_msg, data_c);
                 convert_u32!(high_read_msg, data_c);
-                return Ok(Some(LastReadStorage {
+                return Ok(Some(JamLastReadStorage {
                     user_crc: user_name_crc,
                     user_id: id,
                     last_read_msg,
@@ -385,6 +384,169 @@ impl MessageBase {
         }
         Ok(res)
     }*/
+
+    pub fn iter(&self) -> impl Iterator<Item = crate::Result<JamMessageHeader>> {
+        let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
+        let mut f = File::open(header_file_name).unwrap();
+        f.seek(std::io::SeekFrom::Start(JHRHeaderInfo::JHR_HEADER_SIZE))
+            .unwrap();
+        JamBaseMessageIter {
+            reader: BufReader::new(f),
+        }
+    }
+}
+
+struct JamBaseMessageIter {
+    reader: BufReader<File>,
+}
+
+impl Iterator for JamBaseMessageIter {
+    type Item = crate::Result<JamMessageHeader>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Ok(left) = self.reader.has_data_left() {
+            if !left {
+                return None;
+            }
+            Some(JamMessageHeader::read(&mut self.reader))
+        } else {
+            None
+        }
+    }
+}
+
+/// Used for writing messages to a JAM message base
+/// It's more complex to create a valid jam message than it looks.
+/// Using the builder pattern is recommended.
+#[derive(Default)]
+pub struct JamMessage {
+    header: JamMessageHeader,
+    text: String,
+}
+
+impl JamMessage {
+    pub fn get_msg_number(&self) -> u32 {
+        self.header.message_number
+    }
+    pub fn get_msgid_crc(&self) -> u32 {
+        self.header.msgid_crc
+    }
+
+    /// Creates a new message with an unique message id
+    pub fn new(msg_number: u32, aka: &EchomailAddress) -> Self {
+        let now = SystemTime::now();
+        let date_written = if let Ok(unix_time) = now.duration_since(UNIX_EPOCH) {
+            unix_time.as_secs() as u32
+        } else {
+            0
+        };
+
+        let rnd: u32 = random();
+        let id = format!("{} {:08x}", aka, rnd);
+        let msgid_crc = JamMessageBase::get_crc(&id);
+
+        JamMessage {
+            header: JamMessageHeader {
+                message_number: msg_number,
+                msgid_crc,
+                date_written,
+                sub_fields: vec![MessageSubfield::new(
+                    SubfieldType::MsgID,
+                    id.bytes().collect::<Vec<u8>>(),
+                )],
+                ..Default::default()
+            },
+            text: String::new(),
+        }
+    }
+
+    pub fn with_reply_to(mut self, reply_to: u32) -> Self {
+        self.header.reply_to = reply_to;
+        self
+    }
+
+    pub fn with_date_time(mut self, time: NaiveDateTime) -> Self {
+        self.header.date_written = time.and_utc().timestamp() as u32;
+        self
+    }
+
+    pub fn with_text(mut self, text: String) -> Self {
+        self.text = text;
+        self
+    }
+    pub fn with_attributes(mut self, attributes: u32) -> Self {
+        self.header.attributes = attributes;
+        self
+    }
+    pub fn with_password(mut self, password: String) -> Self {
+        self.header.password_crc = JamMessageBase::get_crc(&password);
+        self
+    }
+
+    pub fn with_sender_name(mut self, name: String) -> Self {
+        self.header.sub_fields.push(MessageSubfield::new(
+            SubfieldType::SenderName,
+            name.bytes().collect::<Vec<u8>>(),
+        ));
+        self
+    }
+
+    pub fn with_receiver_name(mut self, name: String) -> Self {
+        self.header.sub_fields.push(MessageSubfield::new(
+            SubfieldType::RecvName,
+            name.bytes().collect::<Vec<u8>>(),
+        ));
+        self
+    }
+
+    pub fn with_subject(mut self, subject: String) -> Self {
+        self.header.sub_fields.push(MessageSubfield::new(
+            SubfieldType::Subject,
+            subject.bytes().collect::<Vec<u8>>(),
+        ));
+        self
+    }
+
+    pub fn get_text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn create_jam_header(&self) -> JamMessageHeader {
+        self.header.clone()
+    }
+
+    pub fn get_reply_to(&self) -> u32 {
+        self.header.reply_to
+    }
+
+    pub fn get_reply1st(&self) -> u32 {
+        self.header.reply1st
+    }
+
+    pub fn get_replynext(&self) -> u32 {
+        self.header.replynext
+    }
+
+    pub fn get_from(&self) -> Option<String> {
+        for sub in self.header.sub_fields.iter() {
+            if *sub.get_type() == SubfieldType::SenderName {
+                return Some(sub.get_string());
+            }
+        }
+        None
+    }
+
+    pub fn set_reply_crc(&mut self, crc: u32) {
+        self.header.replycrc = crc;
+    }
+
+    pub fn set_reply1st(&mut self, reply1st: u32) {
+        self.header.reply1st = reply1st;
+    }
+
+    pub fn set_replynext(&mut self, replynext: u32) {
+        self.header.replynext = replynext;
+    }
 }
 
 pub mod attributes {

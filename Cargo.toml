@@ -9,3 +9,9 @@ description = "Handles JAM & PCBOARD message bases"
 thiserror = "1.0.58"
 rayon = "1.10.0"
 log = "0.4.14"
+chrono = "0.4.37"
+rand = "0.8.4"
+
+[dev-dependencies]
+tempfile = "3"
+pretty_assertions = "1"
