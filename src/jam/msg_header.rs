@@ -9,7 +9,7 @@ use crate::{
     util::crc32::CRC_SEED,
 };
 
-use super::JamMessageBase;
+use super::{attributes, JamMessageBase};
 
 #[derive(Clone)]
 pub struct JamMessageHeader {
@@ -261,6 +261,10 @@ impl JamMessageHeader {
             file.write_all(&sub_field.buffer)?;
         }
         Ok(())
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.attributes & attributes::MSG_DELETED != 0
     }
 }
 

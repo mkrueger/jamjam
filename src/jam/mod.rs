@@ -40,6 +40,12 @@ pub enum JamError {
 
     #[error("Message number {0} out of range. Valid range is {1}..={2}")]
     MessageNumberOutOfRange(u32, u32, u32),
+
+    #[error("Message was deleted")]
+    MessageDeleted,
+
+    #[error("Index file corrupt at record {0} (file length: {1})")]
+    IndexFileCorrupt(u64, u64),
 }
 
 mod extensions {
@@ -76,6 +82,10 @@ impl JamMessageBase {
             last_read_record: -1,
             is_locked: false,
         })
+    }
+
+    pub fn get_filename(&self) -> &Path {
+        &self.file_name
     }
 
     pub fn get_info(&self) -> &JHRHeaderInfo {
@@ -260,30 +270,113 @@ impl JamMessageBase {
         Ok(res)
     }
 
-    pub fn read_header(&self, header_number: u32) -> crate::Result<JamMessageHeader> {
-        if header_number < self.header_info.base_msg_num
-            || header_number > self.header_info.active_msgs
-        {
+    pub fn read_header(&self, msg_number: u32) -> crate::Result<JamMessageHeader> {
+        if msg_number < self.header_info.base_msg_num || msg_number > self.header_info.active_msgs {
             return Err(JamError::MessageNumberOutOfRange(
-                header_number,
+                msg_number,
                 self.header_info.base_msg_num,
                 self.header_info.active_msgs,
             )
             .into());
         }
-        let record = (header_number - self.header_info.base_msg_num) as u64;
+        let record = (msg_number - self.header_info.base_msg_num) as u64;
 
         let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
         let mut index_file = OpenOptions::new().read(true).open(index_file_name)?;
-        index_file.seek(SeekFrom::Start(record * 8 + 4))?;
+        if let Err(_err) = index_file.seek(SeekFrom::Start(record * 8 + 4)) {
+            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
+        }
         let mut offset = [0; 4];
-        index_file.read_exact(&mut offset)?;
+        if let Err(err) = index_file.read_exact(&mut offset) {
+            log::error!("Error reading index file: {}", err);
+            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
+        }
         let offset = u32::from_le_bytes(offset);
+
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let mut header_file = File::open(header_file_name)?;
         header_file.seek(SeekFrom::Start(offset as u64))?;
         let mut reader = BufReader::new(header_file);
-        JamMessageHeader::read(&mut reader)
+        let header = JamMessageHeader::read(&mut reader)?;
+        log::info!("Read {} deleted {}", msg_number, header.is_deleted());
+
+        if header.is_deleted() {
+            return Err(JamError::MessageDeleted.into());
+        }
+        Ok(header)
+    }
+
+    /// Sets the delete flag of a given message header
+    /// `read_header` will never return a deleted message. But it's still there and can be recovered.
+    /// The message will be deleted when the message base gets packed.
+    pub fn delete_message(&self, msg_number: u32) -> crate::Result<()> {
+        if msg_number < self.header_info.base_msg_num || msg_number > self.header_info.active_msgs {
+            return Err(JamError::MessageNumberOutOfRange(
+                msg_number,
+                self.header_info.base_msg_num,
+                self.header_info.active_msgs,
+            )
+            .into());
+        }
+        let record = (msg_number - self.header_info.base_msg_num) as u64;
+        let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
+        let mut index_file = OpenOptions::new().read(true).open(index_file_name)?;
+        if index_file.seek(SeekFrom::Start(record * 8 + 4)).is_err() {
+            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
+        }
+        let mut offset = [0; 4];
+        index_file.read_exact(&mut offset)?;
+        let offset = u32::from_le_bytes(offset);
+        let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
+        let mut header_file = File::open(&header_file_name)?;
+        header_file.seek(SeekFrom::Start(offset as u64))?;
+        let mut reader = BufReader::new(header_file);
+        let mut header = JamMessageHeader::read(&mut reader)?;
+        if !header.is_deleted() {
+            header.attributes |= attributes::MSG_DELETED;
+            let mut header_file = OpenOptions::new().write(true).open(header_file_name)?;
+            header_file.seek(SeekFrom::Start(offset as u64))?;
+            let mut writer = BufWriter::new(header_file);
+            header.write(&mut writer)?;
+            log::info!("Message {} deleted {}", msg_number, header.is_deleted());
+            writer.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Recovers a deleted message
+    /// The opposite of `delete_message`
+    pub fn restore_message(&self, msg_number: u32) -> crate::Result<()> {
+        if msg_number < self.header_info.base_msg_num || msg_number > self.header_info.active_msgs {
+            return Err(JamError::MessageNumberOutOfRange(
+                msg_number,
+                self.header_info.base_msg_num,
+                self.header_info.active_msgs,
+            )
+            .into());
+        }
+        let record = (msg_number - self.header_info.base_msg_num) as u64;
+        let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
+        let mut index_file = OpenOptions::new().read(true).open(index_file_name)?;
+        if index_file.seek(SeekFrom::Start(record * 8 + 4)).is_err() {
+            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
+        }
+        let mut offset = [0; 4];
+        index_file.read_exact(&mut offset)?;
+        let offset = u32::from_le_bytes(offset);
+        let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
+        let mut header_file = File::open(&header_file_name)?;
+        header_file.seek(SeekFrom::Start(offset as u64))?;
+        let mut reader = BufReader::new(header_file);
+        let mut header = JamMessageHeader::read(&mut reader)?;
+        if header.is_deleted() {
+            header.attributes &= !attributes::MSG_DELETED;
+            let mut header_file = OpenOptions::new().write(true).open(header_file_name)?;
+            header_file.seek(SeekFrom::Start(offset as u64))?;
+            let mut writer = BufWriter::new(header_file);
+            header.write(&mut writer)?;
+        }
+        Ok(())
     }
 
     pub fn read_last_read_file(&self) -> crate::Result<Vec<JamLastReadStorage>> {
