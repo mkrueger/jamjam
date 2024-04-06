@@ -3,7 +3,11 @@ name = "jamjam"
 version = "0.1.0"
 edition = "2021"
 description = "Handles JAM & PCBOARD message bases"
-# See more keys and their defilogitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Mike Krüger <mkrueger@posteo.de>"]
+homepage = "https://www.github.com/mkrueger/jamjam"
+repository = "https://www.github.com/mkrueger/jamjam"
+license-file = "LICENSE"
+keywords = ["jam", "pcboard", "messagebase"]
 
 [dependencies]
 thiserror = "1.0.58"
