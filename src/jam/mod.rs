@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs::File, io::Read};
 
@@ -68,7 +69,7 @@ pub struct JamMessageBase {
     file_name: PathBuf,
     header_info: JHRHeaderInfo,
     last_read_record: i32,
-    is_locked: bool,
+    locked: AtomicBool,
 }
 
 impl JamMessageBase {
@@ -80,7 +81,7 @@ impl JamMessageBase {
             file_name: file_name.as_ref().into(),
             header_info,
             last_read_record: -1,
-            is_locked: false,
+            locked: AtomicBool::new(false),
         })
     }
 
@@ -167,17 +168,20 @@ impl JamMessageBase {
         Ok(())
     }
 
-    pub fn lock(&mut self) -> crate::Result<bool> {
-        if self.is_locked {
-            return Ok(false);
+    /// Locks the message base.
+    /// User is responsible for locking/unlocking.
+    ///
+    /// Note that locking is just process only.
+    pub fn lock(&self) {
+        while self.locked.swap(true, std::sync::atomic::Ordering::Acquire) {
+            std::hint::spin_loop();
         }
-        self.is_locked = true;
-        Ok(true)
     }
 
-    pub fn unlock(&mut self) -> crate::Result<()> {
-        self.is_locked = false;
-        Ok(())
+    /// Unlocks the message base
+    pub fn unlock(&self) {
+        self.locked
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Get the jam base crc of a string
