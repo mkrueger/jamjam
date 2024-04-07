@@ -28,6 +28,9 @@ This message format is only used inside PCBoard - an old bulettin board system. 
 
 It's only the goal to read/understand the PCBoard format for convert it to something else. I don't bother/mind writing update routines for that. However the format is documented and feel free to add it :).
 
+## Example
+
+``` cargo run --example read_jam data/jam/ra ```
 
 ## More formats are awaiting
 
