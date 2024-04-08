@@ -3,8 +3,6 @@ use std::{
     io::{BufReader, Read, Write},
 };
 
-use crate::convert_u32;
-
 #[derive(Default, Debug)]
 pub struct JamLastReadStorage {
     pub user_crc: u32,      // CRC-32 of user name (lowercase)   (1)

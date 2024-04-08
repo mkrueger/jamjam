@@ -13,7 +13,7 @@ use crate::{
     util::echmoail::EchomailAddress,
 };
 
-pub fn get_jam_attributes(msg: &PCBoardMessage) -> u32 {
+fn get_jam_attributes(msg: &PCBoardMessage) -> u32 {
     let mut result = 0;
     match msg.get_status() {
         crate::pcboard::MessageStatus::Private | crate::pcboard::MessageStatus::CommentToSysop => {

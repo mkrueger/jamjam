@@ -7,7 +7,7 @@ use std::{
 use bstr::BString;
 use thiserror::Error;
 
-use crate::{convert_u32, util::basic_real::basicreal_to_u32};
+use crate::util::basic_real::basicreal_to_u32;
 
 use self::{
     base_header::PCBoardMessageBaseHeader,
@@ -44,7 +44,8 @@ mod extensions {
     pub const OLD_INDEX: &str = "ndx";
 }
 
-pub fn convert_str(buf: &[u8]) -> BString {
+/// PCBoard strings contain trailing spaces that need to be removed.
+pub(crate) fn convert_pcboard_str(buf: &[u8]) -> BString {
     let mut str = BString::from(buf);
     while str.ends_with(&[b' ']) {
         str.pop();

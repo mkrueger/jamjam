@@ -1,7 +1,7 @@
 pub const CRC_SEED: u32 = 0xFFFF_FFFF;
 
 #[must_use]
-pub fn get_crc32(buf: &[u8]) -> u32 {
+pub(crate) fn get_crc32(buf: &[u8]) -> u32 {
     let mut result = CRC_SEED;
     let mut buf = buf;
     while buf.len() >= 16 {
@@ -33,11 +33,11 @@ fn update_slow(prev: u32, buf: &[u8]) -> u32 {
     }
     !crc
 }
-
+/*
 #[must_use]
 pub fn update_crc32(crc: u32, b: u8) -> u32 {
     (crc >> 8) ^ CRC32_TABLE[0][(b ^ crc as u8) as usize]
-}
+}*/
 
 // Table & unrolling from https://github.com/srijs/rust-crc32fast
 pub static CRC32_TABLE: [[u32; 256]; 16] = [

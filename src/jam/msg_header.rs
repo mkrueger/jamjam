@@ -6,7 +6,6 @@ use std::{
 use bstr::BString;
 
 use crate::{
-    convert_single_u16, convert_u32,
     jam::{JamError, JAM_SIGNATURE},
     util::crc32::CRC_SEED,
 };
@@ -160,8 +159,10 @@ impl JamMessageHeader {
     }
 
     /// Checks if a password is valid.
-    pub fn is_password_valid(&self, password: &BString) -> bool {
-        self.password_crc == CRC_SEED || self.password_crc == JamMessageBase::get_crc(password)
+    pub fn is_password_valid(&self, password: &str) -> bool {
+        self.password_crc == CRC_SEED
+            || self.password_crc
+                == JamMessageBase::get_crc(&BString::new(password.as_bytes().to_vec()))
     }
 
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {

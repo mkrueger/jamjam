@@ -7,7 +7,7 @@ use std::{
 use bstr::BString;
 use thiserror::Error;
 
-use crate::{convert_qwk_ndx, util::basic_real::basicreal_to_u32};
+use crate::util::basic_real::basicreal_to_u32;
 
 use self::{
     control::{Conference, ControlDat},

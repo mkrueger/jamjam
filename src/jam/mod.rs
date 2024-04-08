@@ -13,7 +13,6 @@ use thiserror::Error;
 
 use crate::util::crc32::{self, CRC_SEED};
 use crate::util::echmoail::EchomailAddress;
-use crate::{convert_single_u32, convert_u32};
 
 use self::jhr_header::JHRHeaderInfo;
 use self::last_read_storage::JamLastReadStorage;

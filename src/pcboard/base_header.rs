@@ -3,7 +3,7 @@ use std::{
     io::{BufWriter, Read, Write},
 };
 
-use crate::{convert_u32, util::basic_real::basicreal_to_u32};
+use crate::util::basic_real::basicreal_to_u32;
 
 pub struct PCBoardMessageBaseHeader {
     /// Highest message number in index file

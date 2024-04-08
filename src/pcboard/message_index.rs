@@ -5,10 +5,7 @@ use std::{
 
 use bstr::BString;
 
-use crate::{
-    convert_to_string, convert_u16, convert_u32, convert_u8,
-    pcboard::{convert_str, FROM_TO_LEN},
-};
+use crate::pcboard::FROM_TO_LEN;
 
 #[derive(Clone, Debug)]
 pub struct PCBoardMessageIndex {

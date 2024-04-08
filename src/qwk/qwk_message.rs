@@ -1,10 +1,6 @@
 use bstr::{BString, ByteSlice};
 
-use crate::{
-    convert_to_string, convert_u16, convert_u8,
-    pcboard::{convert_str, PCB_TXT_EOL_PTR},
-    qwk::QwkError,
-};
+use crate::{pcboard::PCB_TXT_EOL_PTR, qwk::QwkError};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},

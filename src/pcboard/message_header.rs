@@ -1,9 +1,8 @@
 use bstr::BString;
 use chrono::{Datelike, Local, NaiveTime};
 
-use super::{convert_str, PCBoardError};
+use super::{convert_pcboard_str, PCBoardError};
 use crate::{
-    convert_to_string, convert_u32, convert_u8,
     pcboard::{DATE_LEN, FROM_TO_LEN, PASSWORD_LEN, TIME_LEN},
     util::basic_real::basicreal_to_u32,
 };
@@ -368,7 +367,7 @@ impl PCBoardExtendedHeader {
         let function = ExtendedHeaderInformation::from_data(&buf[i..i + Self::FUNC_LEN]).unwrap();
         i += Self::FUNC_LEN + 1; // skip ':'
 
-        let content = convert_str(&buf[i..i + Self::DESC_LEN]);
+        let content = convert_pcboard_str(&buf[i..i + Self::DESC_LEN]);
         i += Self::DESC_LEN;
 
         let status = buf[i];
