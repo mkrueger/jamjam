@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Handles JAM & PCBOARD message bases"
 authors = ["Mike Krüger <mkrueger@posteo.de>"]
-homepage = "https://www.github.com/mkrueger/jamjam"
-repository = "https://www.github.com/mkrueger/jamjam"
+homepage = "https://github.com/mkrueger/jamjam"
+repository = "https://github.com/mkrueger/jamjam"
 license-file = "LICENSE"
 keywords = ["jam", "pcboard", "messagebase"]
 
