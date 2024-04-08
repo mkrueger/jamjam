@@ -28,6 +28,14 @@ This message format is only used inside PCBoard - an old bulettin board system. 
 
 It's only the goal to read/understand the PCBoard format for convert it to something else. I don't bother/mind writing update routines for that. However the format is documented and feel free to add it :).
 
+## QWK
+
+Started to add some QWK support. ATM I'm not at the point where I need the export. But need importing large message bases for testing purposes.
+Reading QWK basese work. However the *.ndx files seem to be pretty useless. There is a +-1 error in current QKW implementations.
+
+However JamJam does the correct thing when reading (and will do when writing). The program that defines QWK is PCBOARD :). PCBoard doesn't count the first record in messages.dat so 0 means it's the 2nd record in the file.
+Which completely makes sense.
+
 ## Example
 
 ``` cargo run --example read_jam data/jam/ra ```

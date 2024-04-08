@@ -3,6 +3,8 @@ use std::{
     io::{BufReader, Read},
 };
 
+use bstr::BString;
+
 use crate::{
     convert_to_string, convert_u16, convert_u32, convert_u8,
     pcboard::{convert_str, FROM_TO_LEN},
@@ -12,8 +14,8 @@ use crate::{
 pub struct PCBoardMessageIndex {
     pub offset: u32,
     pub num: u32,
-    pub to: String,
-    pub from: String,
+    pub to: BString,
+    pub from: BString,
     pub status: u8,
     pub date: u16,
     pub reserved: [u8; 3],

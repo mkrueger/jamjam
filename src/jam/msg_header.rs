@@ -3,6 +3,8 @@ use std::{
     io::{BufReader, BufWriter, Read, Write},
 };
 
+use bstr::BString;
+
 use crate::{
     convert_single_u16, convert_u32,
     jam::{JamError, JAM_SIGNATURE},
@@ -125,28 +127,28 @@ impl Default for JamMessageHeader {
 impl JamMessageHeader {
     pub const FIXED_HEADER_SIZE: usize = 76;
 
-    pub fn get_subject(&self) -> Option<String> {
+    pub fn get_subject(&self) -> Option<&BString> {
         for s in &self.sub_fields {
             if s.get_type() == &SubfieldType::Subject {
-                return Some(s.get_string());
+                return Some(&s.content);
             }
         }
         None
     }
 
-    pub fn get_from(&self) -> Option<String> {
+    pub fn get_from(&self) -> Option<&BString> {
         for s in &self.sub_fields {
             if s.get_type() == &SubfieldType::SenderName {
-                return Some(s.get_string());
+                return Some(&s.content);
             }
         }
         None
     }
 
-    pub fn get_to(&self) -> Option<String> {
+    pub fn get_to(&self) -> Option<&BString> {
         for s in &self.sub_fields {
             if s.get_type() == &SubfieldType::RecvName {
-                return Some(s.get_string());
+                return Some(&s.content);
             }
         }
         None
@@ -158,7 +160,7 @@ impl JamMessageHeader {
     }
 
     /// Checks if a password is valid.
-    pub fn is_password_valid(&self, password: &str) -> bool {
+    pub fn is_password_valid(&self, password: &BString) -> bool {
         self.password_crc == CRC_SEED || self.password_crc == JamMessageBase::get_crc(password)
     }
 
@@ -235,7 +237,7 @@ impl JamMessageHeader {
         let subfield_data_len = self
             .sub_fields
             .iter()
-            .map(|sf| 8 + sf.buffer.len())
+            .map(|sf| 8 + sf.content.len())
             .sum::<usize>();
         file.write_all(&u32::to_le_bytes(subfield_data_len as u32))?;
         file.write_all(&self.times_read.to_le_bytes())?;
@@ -257,8 +259,8 @@ impl JamMessageHeader {
         for sub_field in &self.sub_fields {
             let id: u32 = sub_field.field_type.into();
             file.write_all(&id.to_le_bytes())?;
-            file.write_all(&u32::to_le_bytes(sub_field.buffer.len() as u32))?;
-            file.write_all(&sub_field.buffer)?;
+            file.write_all(&u32::to_le_bytes(sub_field.content.len() as u32))?;
+            file.write_all(&sub_field.content)?;
         }
         Ok(())
     }
@@ -462,19 +464,19 @@ impl From<SubfieldType> for u32 {
 #[derive(Clone)]
 pub struct MessageSubfield {
     field_type: SubfieldType,
-    buffer: Vec<u8>,
+    content: BString,
 }
 
 impl MessageSubfield {
-    pub fn new(field_type: SubfieldType, content: impl Into<Vec<u8>>) -> Self {
+    pub fn new(field_type: SubfieldType, content: BString) -> Self {
         Self {
             field_type,
-            buffer: content.into(),
+            content,
         }
     }
 
-    pub fn get_string(&self) -> String {
-        String::from_utf8_lossy(&self.buffer).to_string()
+    pub fn get_string(&self) -> &BString {
+        &self.content
     }
 
     pub fn get_type(&self) -> &SubfieldType {
@@ -497,7 +499,7 @@ impl MessageSubfield {
         *idx = end;
         Ok(Self {
             field_type: id.into(),
-            buffer,
+            content: BString::new(buffer),
         })
     }
 }

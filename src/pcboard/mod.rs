@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use bstr::BString;
 use thiserror::Error;
 
 use crate::{convert_u32, util::basic_real::basicreal_to_u32};
@@ -30,6 +31,9 @@ const TIME_LEN: usize = 5;
 pub enum PCBoardError {
     #[error("Message number {0} out of range. Valid range is {1}..={2}")]
     MessageNumberOutOfRange(u32, u32, u32),
+
+    #[error("Unknown extended header: {0}")]
+    UnknownExtendedHeader(BString),
 }
 
 mod extensions {
@@ -40,20 +44,9 @@ mod extensions {
     pub const OLD_INDEX: &str = "ndx";
 }
 
-fn convert_block(buf: &[u8]) -> String {
-    let mut str = String::new();
-    for c in buf {
-        if *c == 0 {
-            break;
-        }
-        // str.push(CP437_TO_UNICODE[*c as usize]);
-        str.push(*c as char);
-    }
-    str
-}
-fn convert_str(buf: &[u8]) -> String {
-    let mut str = convert_block(buf);
-    while str.ends_with([' ']) {
+pub fn convert_str(buf: &[u8]) -> BString {
+    let mut str = BString::from(buf);
+    while str.ends_with(&[b' ']) {
         str.pop();
     }
     str
@@ -73,15 +66,12 @@ fn _gen_string(str: &str, num: usize) -> Vec<u8> {
 pub struct PCBoardMessage {
     pub header: PCBoardMessageHeader,
     pub extended_header: Vec<PCBoardExtendedHeader>,
-    pub text: String,
+    pub text: BString,
 }
 
 impl PCBoardMessage {
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
-        let mut text = String::new();
-
         let header = PCBoardMessageHeader::read(file)?;
-
         let mut buf = vec![0; 128 * ((header.num_blocks as usize).saturating_sub(1))];
         file.read_exact(&mut buf)?;
         let mut i = 0;
@@ -93,13 +83,18 @@ impl PCBoardMessage {
                 i += 0x48;
                 continue;
             }
-            text = Self::convert_msg(&buf[i..]);
-            break;
+            let text = convert_msg(&buf[i..]);
+            return Ok(PCBoardMessage {
+                header,
+                extended_header,
+                text,
+            });
         }
+
         Ok(PCBoardMessage {
             header,
             extended_header,
-            text,
+            text: BString::default(),
         })
     }
 
@@ -119,24 +114,22 @@ impl PCBoardMessage {
         b"+~`^#-".contains(&self.header.status)
     }
 
-    fn convert_msg(buf: &[u8]) -> String {
-        let mut str = String::new();
-        for c in buf {
-            if *c == 0 {
-                continue;
-            }
-            if *c == 0x0D || *c == 0xE3 {
-                str.push('\n');
-            } else {
-                str.push(*c as char);
-            }
-        }
-        str
-    }
-
-    pub(crate) fn is_deleted(&self) -> bool {
+    pub fn is_deleted(&self) -> bool {
         self.header.is_deleted()
     }
+}
+
+pub const PCB_TXT_EOL: u8 = 0xE3;
+pub const PCB_TXT_EOL_PTR: &[u8] = &[PCB_TXT_EOL];
+
+pub(crate) fn convert_msg(buf: &[u8]) -> BString {
+    let mut buf = buf.to_vec();
+    for b in &mut buf {
+        if *b == PCB_TXT_EOL {
+            *b = b'\n';
+        }
+    }
+    BString::from(buf)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

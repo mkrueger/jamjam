@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs::File, io::Read};
 
+use bstr::BString;
 use chrono::NaiveDateTime;
 use rand::random;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -126,7 +127,7 @@ impl JamMessageBase {
     }
 
     /// Checks if a password is valid.
-    pub fn is_password_valid(&self, password: &str) -> bool {
+    pub fn is_password_valid(&self, password: &BString) -> bool {
         self.header_info.password_crc == CRC_SEED
             || self.header_info.password_crc == Self::get_crc(password)
     }
@@ -137,7 +138,7 @@ impl JamMessageBase {
 
     pub fn create_with_password<P: AsRef<Path>>(
         file_name: P,
-        password: &str,
+        password: &BString,
     ) -> crate::Result<Self> {
         Self::create_with_passwordcrc(file_name, Self::get_crc(password))
     }
@@ -187,8 +188,10 @@ impl JamMessageBase {
     /// Get the jam base crc of a string
     ///
     /// This is the lowercase z-modem crc32
-    pub fn get_crc(str: &str) -> u32 {
-        let crc = crc32::get_crc32(str.to_ascii_lowercase().as_bytes());
+    pub fn get_crc(str: &BString) -> u32 {
+        let mut str = str.clone();
+        str.make_ascii_lowercase();
+        let crc = crc32::get_crc32(&str);
         crc ^ CRC_SEED
     }
 
@@ -197,11 +200,11 @@ impl JamMessageBase {
         let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
         let mut text_file = OpenOptions::new().append(true).open(text_file_name)?;
 
-        self.header_info.active_msgs = self.header_info.active_msgs.max(header.message_number);
+        self.header_info.active_msgs += 1;
 
         header.offset = text_file.metadata()?.len() as u32;
         header.txt_len = message.get_text().len() as u32;
-        text_file.write_all(message.get_text().as_bytes())?;
+        text_file.write_all(message.get_text())?;
 
         let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
         let header_file = OpenOptions::new().append(true).open(header_path)?;
@@ -214,7 +217,7 @@ impl JamMessageBase {
         let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
         let mut index_file = OpenOptions::new().append(true).open(index_file_name)?;
         let crc = if let Some(to) = header.get_to() {
-            Self::get_crc(&to)
+            Self::get_crc(to)
         } else {
             CRC_SEED
         };
@@ -243,23 +246,13 @@ impl JamMessageBase {
         Ok(())
     }
 
-    pub fn read_msg_text(&self, header: &JamMessageHeader) -> crate::Result<String> {
+    pub fn read_msg_text(&self, header: &JamMessageHeader) -> crate::Result<BString> {
         let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
         let mut text_file = File::open(text_file_name)?;
         text_file.seek(SeekFrom::Start(header.offset as u64))?;
         let mut buffer = vec![0; header.txt_len as usize];
         text_file.read_exact(&mut buffer)?;
-
-        let mut res = String::new();
-
-        for b in buffer {
-            res.push(b as char);
-            if b == b'\r' {
-                res.push('\n');
-            }
-        }
-
-        Ok(res)
+        Ok(BString::new(buffer))
     }
 
     pub fn read_headers(&self) -> crate::Result<Vec<JamMessageHeader>> {
@@ -518,7 +511,7 @@ impl Iterator for JamBaseMessageIter {
 #[derive(Default)]
 pub struct JamMessage {
     header: JamMessageHeader,
-    text: String,
+    text: BString,
 }
 
 impl JamMessage {
@@ -539,7 +532,7 @@ impl JamMessage {
         };
 
         let rnd: u32 = random();
-        let id = format!("{} {:08x}", aka, rnd);
+        let id = BString::from(format!("{} {:08x}", aka, rnd));
         let msgid_crc = JamMessageBase::get_crc(&id);
 
         JamMessage {
@@ -547,13 +540,10 @@ impl JamMessage {
                 message_number: msg_number,
                 msgid_crc,
                 date_written,
-                sub_fields: vec![MessageSubfield::new(
-                    SubfieldType::MsgID,
-                    id.bytes().collect::<Vec<u8>>(),
-                )],
+                sub_fields: vec![MessageSubfield::new(SubfieldType::MsgID, id)],
                 ..Default::default()
             },
-            text: String::new(),
+            text: BString::default(),
         }
     }
 
@@ -567,7 +557,7 @@ impl JamMessage {
         self
     }
 
-    pub fn with_text(mut self, text: String) -> Self {
+    pub fn with_text(mut self, text: BString) -> Self {
         self.text = text;
         self
     }
@@ -575,36 +565,43 @@ impl JamMessage {
         self.header.attributes = attributes;
         self
     }
-    pub fn with_password(mut self, password: String) -> Self {
-        self.header.password_crc = JamMessageBase::get_crc(&password);
+
+    pub fn with_password(mut self, password: &BString) -> Self {
+        self.header.password_crc = JamMessageBase::get_crc(password);
         self
     }
 
-    pub fn with_sender_name(mut self, name: String) -> Self {
-        self.header.sub_fields.push(MessageSubfield::new(
-            SubfieldType::SenderName,
-            name.bytes().collect::<Vec<u8>>(),
-        ));
+    pub fn with_from(mut self, name: BString) -> Self {
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::SenderName, name));
         self
     }
 
-    pub fn with_receiver_name(mut self, name: String) -> Self {
-        self.header.sub_fields.push(MessageSubfield::new(
-            SubfieldType::RecvName,
-            name.bytes().collect::<Vec<u8>>(),
-        ));
+    pub fn with_to(mut self, name: BString) -> Self {
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::RecvName, name));
         self
     }
 
-    pub fn with_subject(mut self, subject: String) -> Self {
-        self.header.sub_fields.push(MessageSubfield::new(
-            SubfieldType::Subject,
-            subject.bytes().collect::<Vec<u8>>(),
-        ));
+    pub fn with_subject(mut self, subject: BString) -> Self {
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::Subject, subject));
         self
     }
 
-    pub fn get_text(&self) -> &str {
+    pub fn with_is_deleted(mut self, deleted: bool) -> Self {
+        if deleted {
+            self.header.attributes |= attributes::MSG_DELETED;
+        } else {
+            self.header.attributes &= !attributes::MSG_DELETED;
+        }
+        self
+    }
+
+    pub fn get_text(&self) -> &BString {
         &self.text
     }
 
@@ -624,7 +621,7 @@ impl JamMessage {
         self.header.replynext
     }
 
-    pub fn get_from(&self) -> Option<String> {
+    pub fn get_from(&self) -> Option<&BString> {
         for sub in self.header.sub_fields.iter() {
             if *sub.get_type() == SubfieldType::SenderName {
                 return Some(sub.get_string());

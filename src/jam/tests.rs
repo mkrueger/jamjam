@@ -45,7 +45,7 @@ fn test_iter_ra() {
         let msg = msg.unwrap();
         for sub in msg.sub_fields.iter() {
             if *sub.get_type() == SubfieldType::MsgID {
-                assert_eq!(JamMessageBase::get_crc(&sub.get_string()), msg.msgid_crc);
+                assert_eq!(JamMessageBase::get_crc(sub.get_string()), msg.msgid_crc);
             }
         }
     }
@@ -60,7 +60,7 @@ fn test_iter_mystic() {
         println!("{} {} {}", msg.reply1st, msg.reply_to, msg.replynext);
         for sub in msg.sub_fields.iter() {
             if *sub.get_type() == SubfieldType::MsgID {
-                assert_eq!(JamMessageBase::get_crc(&sub.get_string()), msg.msgid_crc);
+                assert_eq!(JamMessageBase::get_crc(sub.get_string()), msg.msgid_crc);
             }
         }
     }
@@ -74,7 +74,7 @@ fn test_iter_elebbs() {
         let msg = msg.unwrap();
         for sub in msg.sub_fields.iter() {
             if *sub.get_type() == SubfieldType::MsgID {
-                assert_eq!(JamMessageBase::get_crc(&sub.get_string()), msg.msgid_crc);
+                assert_eq!(JamMessageBase::get_crc(sub.get_string()), msg.msgid_crc);
             }
         }
     }

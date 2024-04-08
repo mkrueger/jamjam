@@ -1,6 +1,7 @@
+use bstr::BString;
 use chrono::{Datelike, Local, NaiveTime};
 
-use super::convert_str;
+use super::{convert_str, PCBoardError};
 use crate::{
     convert_to_string, convert_u32, convert_u8,
     pcboard::{DATE_LEN, FROM_TO_LEN, PASSWORD_LEN, TIME_LEN},
@@ -9,7 +10,6 @@ use crate::{
 use std::{
     fs::File,
     io::{BufReader, Read},
-    str::FromStr,
 };
 
 pub enum MessageType {
@@ -47,7 +47,7 @@ pub struct PCBoardMessageHeader {
     pub date_time: String,
 
     /// 25 character "To" field
-    pub to_field: String,
+    pub to_field: BString,
 
     /// Date as number YYMMDD
     pub reply_date: u32,
@@ -59,13 +59,13 @@ pub struct PCBoardMessageHeader {
     pub reply_status: u8,
 
     /// 25 character "From" field
-    pub from_field: String,
+    pub from_field: BString,
 
     /// 25 character "Subj" field
-    pub subj_field: String,
+    pub subj_field: BString,
 
     /// 12 character "Password" in plain text
-    pub password: String,
+    pub password: BString,
 
     /// 225 == active, 226 == deleted
     pub active_flag: u8,
@@ -213,10 +213,10 @@ impl PCBoardMessageHeader {
             msg_number,
             reply_to: ref_number,
             num_blocks,
-            date_time,
+            date_time: date_time.to_string(),
             to_field,
             reply_date,
-            reply_time,
+            reply_time: reply_time.to_string(),
             reply_status,
             from_field,
             subj_field,
@@ -253,34 +253,77 @@ pub enum ExtendedHeaderInformation {
     Ufollow,
     Unewsgr,
 }
-
-impl FromStr for ExtendedHeaderInformation {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "TO" => Ok(Self::To),
-            "FROM" => Ok(Self::From),
-            "SUBJECT" => Ok(Self::Subject),
-            "ATTACH" => Ok(Self::Attach),
-            "LIST" => Ok(Self::List),
-            "ROUTE" => Ok(Self::Route),
-            "ORIGIN" => Ok(Self::Origin),
-            "REQRR" => Ok(Self::Reqrr),
-            "ACKRR" => Ok(Self::Ackrr),
-            "ACKNAME" => Ok(Self::Ackname),
-            "PACKOUT" => Ok(Self::Packout),
-            "TO2" => Ok(Self::To2),
-            "FROM2" => Ok(Self::From2),
-            "FORWARD" => Ok(Self::Forward),
-            "UFOLLOW" => Ok(Self::Ufollow),
-            "UNEWSGR" => Ok(Self::Unewsgr),
-            _ => Err(()),
-        }
-    }
-}
+const TO: &[u8; 7] = b"TO     ";
+const FROM: &[u8; 7] = b"FROM   ";
+const SUBJECT: &[u8; 7] = b"SUBJECT";
+const ATTACH: &[u8; 7] = b"ATTACH ";
+const LIST: &[u8; 7] = b"LIST   ";
+const ROUTE: &[u8; 7] = b"ROUTE  ";
+const ORIGIN: &[u8; 7] = b"ORIGIN ";
+const REQRR: &[u8; 7] = b"REQRR  ";
+const ACKRR: &[u8; 7] = b"ACKRR  ";
+const ACKNAME: &[u8; 7] = b"ACKNAME";
+const PACKOUT: &[u8; 7] = b"PACKOUT";
+const TO2: &[u8; 7] = b"TO2    ";
+const FROM2: &[u8; 7] = b"FROM2  ";
+const FORWARD: &[u8; 7] = b"FORWARD";
+const UFOLLOW: &[u8; 7] = b"UFOLLOW";
+const UNEWSGR: &[u8; 7] = b"UNEWSGR";
 
 impl ExtendedHeaderInformation {
+    fn from_data(data: &[u8]) -> crate::Result<Self> {
+        if *data == *TO {
+            return Ok(Self::To);
+        }
+        if *data == *FROM {
+            return Ok(Self::From);
+        }
+        if *data == *SUBJECT {
+            return Ok(Self::Subject);
+        }
+        if *data == *ATTACH {
+            return Ok(Self::Attach);
+        }
+        if *data == *LIST {
+            return Ok(Self::List);
+        }
+        if *data == *ROUTE {
+            return Ok(Self::Route);
+        }
+        if *data == *ORIGIN {
+            return Ok(Self::Origin);
+        }
+        if *data == *REQRR {
+            return Ok(Self::Reqrr);
+        }
+        if *data == *ACKRR {
+            return Ok(Self::Ackrr);
+        }
+        if *data == *ACKNAME {
+            return Ok(Self::Ackname);
+        }
+        if *data == *PACKOUT {
+            return Ok(Self::Packout);
+        }
+        if *data == *TO2 {
+            return Ok(Self::To2);
+        }
+        if *data == *FROM2 {
+            return Ok(Self::From2);
+        }
+        if *data == *FORWARD {
+            return Ok(Self::Forward);
+        }
+        if *data == *UFOLLOW {
+            return Ok(Self::Ufollow);
+        }
+        if *data == *UNEWSGR {
+            return Ok(Self::Unewsgr);
+        }
+
+        Err(PCBoardError::UnknownExtendedHeader(BString::new(data.to_vec())).into())
+    }
+
     pub fn to_str(&self) -> &'static str {
         match self {
             Self::To => "TO     ",
@@ -305,7 +348,7 @@ impl ExtendedHeaderInformation {
 
 pub struct PCBoardExtendedHeader {
     pub info: ExtendedHeaderInformation,
-    pub content: String,
+    pub content: BString,
     /// 'N' == none, 'R' == read
     pub status: u8,
 }
@@ -322,8 +365,7 @@ impl PCBoardExtendedHeader {
     pub fn deserialize(buf: &[u8]) -> crate::Result<Self> {
         // let _id = u16::from_le_bytes([buf[0], buf[1]]);
         let mut i = 2;
-        let function =
-            ExtendedHeaderInformation::from_str(&convert_str(&buf[i..i + Self::FUNC_LEN])).unwrap();
+        let function = ExtendedHeaderInformation::from_data(&buf[i..i + Self::FUNC_LEN]).unwrap();
         i += Self::FUNC_LEN + 1; // skip ':'
 
         let content = convert_str(&buf[i..i + Self::DESC_LEN]);
