@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, BufWriter, Read, Seek},
+    io::{BufReader, BufWriter, Read, Seek},
     path::{Path, PathBuf},
 };
 
@@ -254,23 +254,27 @@ impl PCBoardMessageBase {
     pub fn iter(&self) -> impl Iterator<Item = crate::Result<PCBoardMessage>> {
         let idx_file_name = self.file_name.clone();
         let mut f = File::open(idx_file_name).unwrap();
+        let size = f.metadata().unwrap().len();
+
         f.seek(std::io::SeekFrom::Start(128)).unwrap();
         PCBoardMessageIter {
             reader: BufReader::new(f),
+            size,
         }
     }
 }
 
 struct PCBoardMessageIter {
     reader: BufReader<File>,
+    size: u64,
 }
 
 impl Iterator for PCBoardMessageIter {
     type Item = crate::Result<PCBoardMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(left) = self.reader.has_data_left() {
-            if !left {
+        if let Ok(pos) = self.reader.stream_position() {
+            if pos >= self.size {
                 return None;
             }
             Some(PCBoardMessage::read(&mut self.reader))

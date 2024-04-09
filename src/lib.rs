@@ -1,5 +1,3 @@
-#![feature(buf_read_has_data_left)]
-
 #[macro_use]
 pub(crate) mod macros;
 

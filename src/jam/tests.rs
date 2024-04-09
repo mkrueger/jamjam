@@ -34,7 +34,7 @@ fn test_get_text() {
     let txt = base.read_msg_text(&header).unwrap();
     assert_eq!(
         txt,
-        "private message\r\n\r\n... Multitasking: Reading in the bathroom\r\n"
+        "private message\r\r... Multitasking: Reading in the bathroom\r"
     );
 }
 

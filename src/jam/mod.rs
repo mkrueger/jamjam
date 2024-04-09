@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -477,24 +477,27 @@ impl JamMessageBase {
     pub fn iter(&self) -> impl Iterator<Item = crate::Result<JamMessageHeader>> {
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let mut f = File::open(header_file_name).unwrap();
+        let size = f.metadata().unwrap().len();
         f.seek(std::io::SeekFrom::Start(JHRHeaderInfo::JHR_HEADER_SIZE))
             .unwrap();
         JamBaseMessageIter {
             reader: BufReader::new(f),
+            size,
         }
     }
 }
 
 struct JamBaseMessageIter {
     reader: BufReader<File>,
+    size: u64,
 }
 
 impl Iterator for JamBaseMessageIter {
     type Item = crate::Result<JamMessageHeader>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(left) = self.reader.has_data_left() {
-            if !left {
+        if let Ok(pos) = self.reader.stream_position() {
+            if pos >= self.size {
                 return None;
             }
             Some(JamMessageHeader::read(&mut self.reader))

@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, Seek},
+    io::{BufReader, Seek},
     path::{Path, PathBuf},
 };
 
@@ -152,23 +152,26 @@ impl QwkMessageBase {
     pub fn iter(&self) -> impl Iterator<Item = crate::Result<QWKMessage>> {
         let idx_file_name = self.path.join("messages.dat");
         let mut f = File::open(idx_file_name).unwrap();
+        let size = f.metadata().unwrap().len();
         f.seek(std::io::SeekFrom::Start(128)).unwrap();
         QWKMessageIter {
             reader: BufReader::new(f),
+            size,
         }
     }
 }
 
 struct QWKMessageIter {
     reader: BufReader<File>,
+    size: u64,
 }
 
 impl Iterator for QWKMessageIter {
     type Item = crate::Result<QWKMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(left) = self.reader.has_data_left() {
-            if !left {
+        if let Ok(pos) = self.reader.stream_position() {
+            if pos >= self.size {
                 return None;
             }
             Some(QWKMessage::read(&mut self.reader, true))
