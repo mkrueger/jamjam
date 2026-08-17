@@ -94,6 +94,19 @@ Every fallible call returns `jamjam::Result<T>`, which carries a `jamjam::Error`
 reindexing and verifying a 2000 message base, plus header serialization.
 Pass a name to run part of it, for example `cargo bench -- read`.
 
+## Fuzzing
+
+`cargo test --test fuzz` mutates valid data with a fixed seed and feeds it back
+in. A parser may reject it, but it must not panic and must be able to encode
+what it accepted, so this runs with the normal test suite.
+
+Coverage guided runs live in `fuzz/` and need nightly:
+
+``` cargo +nightly fuzz run jam_header ```
+
+The targets are `jam_header`, `jam_base`, `pcboard_message`, `qwk_message`,
+`qwk_control` and `qwk_index`.
+
 ## More formats are awaiting
 
 Maybe Squish next?

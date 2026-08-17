@@ -65,7 +65,8 @@ pub struct ControlDat {
     ///
     /// MarkMail and a few others send user details here. The format is not
     /// part of the original QWK specification, so the lines are kept as they
-    /// were rather than interpreted.
+    /// were rather than interpreted. Blank lines at the end of the file carry
+    /// nothing and are dropped, they cannot survive a write either.
     pub extra_lines: Vec<BString>,
 }
 const EOL: &[u8; 1] = b"\n";
@@ -125,7 +126,12 @@ impl ControlDat {
         let welcome_screen = BString::from(lines.next().unwrap_or_default());
         let news_screen = BString::from(lines.next().unwrap_or_default());
         let logoff_screen = BString::from(lines.next().unwrap_or_default());
-        let extra_lines = lines.map(BString::from).collect();
+        let mut extra_lines: Vec<BString> = lines.map(BString::from).collect();
+        // The writer separates the extra lines, so a blank line at the end
+        // would be lost anyway. Drop it here to keep reading and writing exact.
+        while extra_lines.last().is_some_and(|line| line.is_empty()) {
+            extra_lines.pop();
+        }
         Ok(Self {
             bbs_name,
             bbs_city_and_state,

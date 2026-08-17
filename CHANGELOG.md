@@ -17,6 +17,7 @@
 - Read-only `verify()` and explicit `repair()` consistency APIs.
 - Full-message iteration, recipient and MSGID search helpers, and bounded serialization.
 - Criterion benchmarks for reading, writing, searching, packing, verification, and header encoding.
+- Seeded mutation fuzzing in the test suite and cargo-fuzz targets for the JAM, PCBoard and QWK parsers.
 
 ### Fixed
 
@@ -24,6 +25,7 @@
 - Rejected truncated or corrupt JAM, PCBoard, and QWK data instead of panicking or silently truncating it.
 - Preserved QWK text and extended fields during conversion and completed PCBoard reply chains.
 - Made last-read updates atomic and safe for missing, truncated, packed, and renumbered bases.
+- Dropped blank lines at the end of `CONTROL.DAT`, which a write could not preserve anyway.
 
 ### Performance
 

@@ -61,6 +61,19 @@ fn test_control_dat_keeps_optional_trailing_lines() {
 }
 
 #[test]
+fn test_control_dat_drops_blank_lines_at_the_end() {
+    let mut packet = TEST_CONTROL_DAT.to_vec();
+    packet.extend(b"\nJane\n\n\n");
+
+    let dat = ControlDat::read(&packet).unwrap();
+    assert_eq!(dat.extra_lines, vec![BString::from("Jane")]);
+    assert_eq!(
+        ControlDat::read(&dat.to_vec()).unwrap().extra_lines,
+        dat.extra_lines
+    );
+}
+
+#[test]
 fn test_generate_control_dat() {
     let dat = ControlDat {
         bbs_name: BString::from("My BBS"),

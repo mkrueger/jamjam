@@ -11,6 +11,8 @@ repository = "https://github.com/mkrueger/jamjam"
 license = "MIT OR Apache-2.0"
 keywords = ["jam", "pcboard", "qwk", "qwke", "messagebase"]
 categories = ["parser-implementations", "encoding", "filesystem"]
+# The fuzz targets are a separate nightly-only crate.
+exclude = ["fuzz"]
 
 [dependencies]
 thiserror = "2.0.17"

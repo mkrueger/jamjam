@@ -1,0 +1,65 @@
+[package]
+name = "jamjam-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+bstr = "1.10.0"
+libfuzzer-sys = "0.4"
+tempfile = "3.23.0"
+
+[dependencies.jamjam]
+path = ".."
+
+# Keeps the fuzz targets out of the library build.
+[workspace]
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "jam_header"
+path = "fuzz_targets/jam_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jam_base"
+path = "fuzz_targets/jam_base.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pcboard_message"
+path = "fuzz_targets/pcboard_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qwk_message"
+path = "fuzz_targets/qwk_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qwk_control"
+path = "fuzz_targets/qwk_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qwk_index"
+path = "fuzz_targets/qwk_index.rs"
+test = false
+doc = false
+bench = false
