@@ -243,7 +243,7 @@ impl JamMessageHeader {
             .read_to_end(&mut subfield_data)?;
         if subfield_data.len() != subfield_data_len as usize {
             return Err(
-                JamError::InvalidSubfieldLength(subfield_data_len, subfield_data.len()).into(),
+                JamError::SubfieldBlockTruncated(subfield_data_len, subfield_data.len()).into(),
             );
         }
 

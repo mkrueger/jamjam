@@ -77,6 +77,9 @@ pub enum JamError {
     #[error("subfield block of {0} bytes exceeds the {1} byte limit")]
     SubfieldBlockTooLarge(u32, u32),
 
+    #[error("subfield block truncated, expected {0} bytes, got {1}")]
+    SubfieldBlockTruncated(u32, usize),
+
     #[error("subfield of {0} bytes exceeds the {1} byte limit")]
     SubfieldTooLarge(u32, u32),
 }

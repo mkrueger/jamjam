@@ -194,6 +194,8 @@ pub struct RepairReport {
     pub after: VerifyReport,
     /// Whether the index was rebuilt from the headers.
     pub reindexed: bool,
+    /// Bytes dropped from a trailing partial lastread record.
+    pub last_read_bytes_dropped: u64,
     /// Lastread pointers that were pulled back into the message number range.
     pub last_read_records_clamped: u32,
 }
@@ -210,10 +212,11 @@ impl JamMessageBase {
     /// Rebuilds what can be derived again and reports what is left.
     ///
     /// The index is rebuilt from the message headers when the index is at
-    /// fault, `ActiveMsgs` is recounted with it and lastread pointers outside
-    /// the message number range are clamped. Message text is never rewritten,
-    /// so anything reported in [`RepairReport::after`] needs a decision that
-    /// this library cannot make.
+    /// fault, `ActiveMsgs` is recounted with it, a trailing partial lastread
+    /// record is dropped and lastread pointers outside the message number
+    /// range are clamped. Message text is never rewritten, so anything
+    /// reported in [`RepairReport::after`] needs a decision that this library
+    /// cannot make.
     pub fn repair(&mut self) -> crate::Result<RepairReport> {
         self.transaction(|base| {
             let before = base.verify_locked()?;
@@ -221,12 +224,14 @@ impl JamMessageBase {
             if reindexed {
                 base.reindex_locked()?;
             }
+            let last_read_bytes_dropped = base.truncate_last_read()?;
             let last_read_records_clamped = base.clamp_last_read()?;
             let after = base.verify_locked()?;
             Ok(RepairReport {
                 before,
                 after,
                 reindexed,
+                last_read_bytes_dropped,
                 last_read_records_clamped,
             })
         })
@@ -361,6 +366,22 @@ impl JamMessageBase {
             }
         }
         Ok(())
+    }
+
+    /// Drops a trailing partial lastread record so the file holds whole records.
+    fn truncate_last_read(&mut self) -> crate::Result<u64> {
+        let path = self.file_name.with_extension(extensions::LASTREAD_INFO);
+        let data = match fs::read(&path) {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(err.into()),
+        };
+        let extra = data.len() % LASTREAD_RECORD_SIZE;
+        if extra == 0 {
+            return Ok(0);
+        }
+        self.store_last_read_records(&data[..data.len() - extra])?;
+        Ok(extra as u64)
     }
 
     /// Pulls lastread pointers back to the highest message the base addresses.

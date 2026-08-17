@@ -102,6 +102,44 @@ fn test_repair_rebuilds_a_lost_index_and_clamps_lastread() {
 }
 
 #[test]
+fn test_repair_drops_a_partial_lastread_record() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("partial");
+    let mut base = filled(&path);
+    base.write_last_read(&JamLastReadStorage {
+        user_crc: 1,
+        user_id: 2,
+        last_read_msg: 2,
+        high_read_msg: 2,
+    })
+    .unwrap();
+
+    let mut data = std::fs::read(path.with_extension("jlr")).unwrap();
+    data.extend_from_slice(&[0u8; 4]);
+    std::fs::write(path.with_extension("jlr"), data).unwrap();
+
+    let report = base.repair().unwrap();
+    assert_eq!(report.last_read_bytes_dropped, 4);
+    assert!(
+        report
+            .before
+            .problems
+            .iter()
+            .any(|problem| matches!(problem, Problem::LastReadFileTruncated { .. }))
+    );
+    assert!(
+        !report
+            .after
+            .problems
+            .iter()
+            .any(|problem| matches!(problem, Problem::LastReadFileTruncated { .. })),
+        "{:?}",
+        report.after
+    );
+    assert_eq!(base.find_last_read(1, 2).unwrap().unwrap().last_read_msg, 2);
+}
+
+#[test]
 fn test_verify_does_not_rewrite_the_base() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("readonly");
