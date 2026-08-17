@@ -24,12 +24,6 @@ pub mod last_read_storage;
 pub mod msg_header;
 pub mod pack;
 
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod pack_tests;
-
 #[derive(Error, Debug)]
 pub enum JamError {
     #[error("Invalid header signature (needs to start with 'JAM\\0')")]
@@ -52,6 +46,23 @@ pub enum JamError {
 
     #[error("Index file corrupt at record {0} (file length: {1})")]
     IndexFileCorrupt(u64, u64),
+
+    #[error("Message base is full, offset {0} does not fit the 32 bit field the format provides")]
+    MessageBaseFull(u64),
+
+    #[error("Message text of {0} bytes exceeds the 4 GB a JAM message base can address")]
+    MessageTooLarge(usize),
+
+    #[error("Message text at offset {0} runs {1} bytes past the end of the text file")]
+    TextOutOfBounds(u64, u64),
+
+    #[error("Lastread file corrupted, {0} bytes is not a whole number of records")]
+    LastReadFileCorrupted(u64),
+}
+
+/// JAM stores every file offset in a `ulong`, so a base cannot grow past 4 GB.
+fn offset_u32(value: u64) -> crate::Result<u32> {
+    u32::try_from(value).map_err(|_| JamError::MessageBaseFull(value).into())
 }
 
 mod extensions {
@@ -73,6 +84,12 @@ const JAM_SIGNATURE: [u8; 4] = [b'J', b'A', b'M', 0];
 /// Two ulongs: CRC-32 of the recipient and the header offset in the .JHR file.
 pub(crate) const INDEX_RECORD_SIZE: usize = 8;
 
+/// Four ulongs: user CRC, user id, last read and high read message number.
+const LASTREAD_RECORD_SIZE: usize = 16;
+
+/// "If the lastread record is deleted, UserCRC and UserID are both set to -1."
+const LASTREAD_DELETED: [u8; 8] = [0xFF; 8];
+
 /// Below this many index records a plain scan beats spawning rayon tasks.
 const PARALLEL_SEARCH_THRESHOLD: usize = 8192;
 
@@ -81,7 +98,6 @@ pub struct JamMessageBase {
     header_info: JhrHeaderInfo,
     /// Number of records in the .JDX file, including the slots of deleted messages.
     index_records: u32,
-    last_read_record: i32,
     locked: AtomicBool,
 }
 
@@ -98,7 +114,6 @@ impl JamMessageBase {
             file_name: file_name.into(),
             header_info,
             index_records: 0,
-            last_read_record: -1,
             locked: AtomicBool::new(false),
         };
         base.index_records = base.count_index_records()?;
@@ -307,8 +322,11 @@ impl JamMessageBase {
     ) -> crate::Result<()> {
         let mut header = message.create_jam_header();
         header.message_number = msg_number;
-        header.offset = text_offset as u32;
-        header.txt_len = message.text().len() as u32;
+        header.offset = offset_u32(text_offset)?;
+        header.txt_len = u32::try_from(message.text().len())
+            .map_err(|_| JamError::MessageTooLarge(message.text().len()))?;
+        offset_u32(text_offset + header.txt_len as u64)?;
+        let index_offset = offset_u32(header_offset)?;
 
         let mut text_file = OpenOptions::new()
             .create(true)
@@ -331,7 +349,7 @@ impl JamMessageBase {
             .open(index_path)?;
         let crc = header.to().map_or(CRC_SEED, Self::crc);
         index_file.write_all(&crc.to_le_bytes())?;
-        index_file.write_all(&(header_offset as u32).to_le_bytes())?;
+        index_file.write_all(&index_offset.to_le_bytes())?;
         index_file.flush()?;
         Ok(())
     }
@@ -362,6 +380,12 @@ impl JamMessageBase {
     pub fn read_message_text(&self, header: &JamMessageHeader) -> crate::Result<BString> {
         let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
         let mut text_file = File::open(text_file_name)?;
+        // The length comes off disk, so check it before trusting it with an allocation.
+        let file_len = text_file.metadata()?.len();
+        let end = header.offset as u64 + header.txt_len as u64;
+        if end > file_len {
+            return Err(JamError::TextOutOfBounds(header.offset as u64, end - file_len).into());
+        }
         text_file.seek(SeekFrom::Start(header.offset as u64))?;
         let mut buffer = vec![0; header.txt_len as usize];
         text_file.read_exact(&mut buffer)?;
@@ -533,89 +557,105 @@ impl JamMessageBase {
         Ok(())
     }
 
+    /// All lastread records, deleted ones included.
     pub fn read_last_read_file(&self) -> crate::Result<Vec<JamLastReadStorage>> {
-        let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
-        let last_read_file = File::open(last_read_file_name)?;
-        let mut res = Vec::new();
-        let mut reader = BufReader::new(last_read_file);
-        while let Ok(last_read) = JamLastReadStorage::load(&mut reader) {
-            res.push(last_read);
-        }
-        Ok(res)
+        let data = self.read_last_read_records()?;
+        data.chunks_exact(LASTREAD_RECORD_SIZE)
+            .map(|mut record| JamLastReadStorage::load(&mut record))
+            .collect()
     }
 
-    pub fn write_last_read(&self, opt: JamLastReadStorage) -> crate::Result<()> {
-        let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .open(last_read_file_name)?;
-        const LEN: u64 = 16;
-        file.seek(SeekFrom::Start(self.last_read_record as u64 * LEN))?;
-        opt.write(&mut file)?;
+    fn read_last_read_records(&self) -> crate::Result<Vec<u8>> {
+        let path = self.file_name.with_extension(extensions::LASTREAD_INFO);
+        let data = match fs::read(&path) {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => return Err(err.into()),
+        };
+        if !data.len().is_multiple_of(LASTREAD_RECORD_SIZE) {
+            return Err(JamError::LastReadFileCorrupted(data.len() as u64).into());
+        }
+        Ok(data)
+    }
+
+    /// Record a user occupies in the .JLR file, deleted records are skipped.
+    fn last_read_record(&self, user_crc: u32, user_id: u32) -> crate::Result<Option<u64>> {
+        let data = self.read_last_read_records()?;
+        let mut needle = [0; 8];
+        needle[..4].copy_from_slice(&user_crc.to_le_bytes());
+        needle[4..].copy_from_slice(&user_id.to_le_bytes());
+
+        Ok(data
+            .chunks_exact(LASTREAD_RECORD_SIZE)
+            .position(|record| record[..8] == needle && record[..8] != LASTREAD_DELETED)
+            .map(|record| record as u64))
+    }
+
+    /// Stores a lastread record, replacing the one the user already has.
+    ///
+    /// The format does not fix the position of a record, so it is searched for
+    /// on every store, as the specification requires. A user without a record
+    /// yet gets one appended.
+    pub fn write_last_read(&self, storage: &JamLastReadStorage) -> crate::Result<()> {
+        let path = self.file_name.with_extension(extensions::LASTREAD_INFO);
+        match self.last_read_record(storage.user_crc, storage.user_id)? {
+            Some(record) => {
+                let mut file = OpenOptions::new().write(true).truncate(false).open(path)?;
+                file.seek(SeekFrom::Start(record * LASTREAD_RECORD_SIZE as u64))?;
+                storage.write(&mut file)?;
+            }
+            None => {
+                let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+                storage.write(&mut file)?;
+            }
+        }
         Ok(())
     }
 
+    /// Returns the lastread record of a user, creating an empty one if the user
+    /// does not have one yet.
     pub fn create_last_read(
-        &mut self,
-        user_name_crc: u32,
-        id: u32,
+        &self,
+        user_crc: u32,
+        user_id: u32,
     ) -> crate::Result<JamLastReadStorage> {
-        let opt = JamLastReadStorage {
-            user_crc: user_name_crc,
-            user_id: id,
+        if let Some(existing) = self.find_last_read(user_crc, user_id)? {
+            return Ok(existing);
+        }
+        let storage = JamLastReadStorage {
+            user_crc,
+            user_id,
             ..Default::default()
         };
-        let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
-
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(last_read_file_name)?;
-        const LEN: u64 = 16;
-        self.last_read_record = (file.metadata()?.len() / LEN) as i32;
-        opt.write(&mut file)?;
-        Ok(opt)
+        self.write_last_read(&storage)?;
+        Ok(storage)
     }
 
+    /// Looks up the lastread record of a user.
     pub fn find_last_read(
-        &mut self,
-        user_name_crc: u32,
-        id: u32,
+        &self,
+        user_crc: u32,
+        user_id: u32,
     ) -> crate::Result<Option<JamLastReadStorage>> {
-        let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
-        let file = File::open(last_read_file_name)?;
-        let mut reader = BufReader::new(file);
+        let Some(record) = self.last_read_record(user_crc, user_id)? else {
+            return Ok(None);
+        };
+        let data = self.read_last_read_records()?;
+        let start = record as usize * LASTREAD_RECORD_SIZE;
+        let mut slice = &data[start..start + LASTREAD_RECORD_SIZE];
+        Ok(Some(JamLastReadStorage::load(&mut slice)?))
+    }
 
-        let id_bytes = id.to_le_bytes();
-        let crc_bytes = user_name_crc.to_le_bytes();
-
-        let needle = [
-            crc_bytes[0],
-            crc_bytes[1],
-            crc_bytes[2],
-            crc_bytes[3],
-            id_bytes[0],
-            id_bytes[1],
-            id_bytes[2],
-            id_bytes[3],
-        ];
-        let data = &mut [0; 16];
-        let mut record_number = 0;
-        while reader.read_exact(data).is_ok() {
-            if data.starts_with(&needle) {
-                self.last_read_record = record_number;
-                let mut data_c = &data[8..];
-                convert_u32!(last_read_msg, data_c);
-                convert_u32!(high_read_msg, data_c);
-                return Ok(Some(JamLastReadStorage {
-                    user_crc: user_name_crc,
-                    user_id: id,
-                    last_read_msg,
-                    high_read_msg,
-                }));
-            }
-            record_number += 1;
-        }
-        Ok(None)
+    /// Marks the lastread record of a user deleted, as the format prescribes.
+    pub fn delete_last_read(&self, user_crc: u32, user_id: u32) -> crate::Result<bool> {
+        let Some(record) = self.last_read_record(user_crc, user_id)? else {
+            return Ok(false);
+        };
+        let path = self.file_name.with_extension(extensions::LASTREAD_INFO);
+        let mut file = OpenOptions::new().write(true).truncate(false).open(path)?;
+        file.seek(SeekFrom::Start(record * LASTREAD_RECORD_SIZE as u64))?;
+        file.write_all(&LASTREAD_DELETED)?;
+        Ok(true)
     }
 
     /// Message numbers of every index record addressed to the given name CRC.

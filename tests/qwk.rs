@@ -1,9 +1,7 @@
-use super::{
-    QwkMessageBase,
-    control::{Conference, ControlDat},
-    qwk_message::{MSG_ACTIVE, QwkMessage},
-};
 use bstr::BString;
+use jamjam::qwk::QwkMessageBase;
+use jamjam::qwk::control::{Conference, ControlDat};
+use jamjam::qwk::qwk_message::{MSG_ACTIVE, QwkMessage};
 use pretty_assertions::assert_eq;
 
 const TEST_CONTROL_DAT: &[u8; 114] = b"My BBS

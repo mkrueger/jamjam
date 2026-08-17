@@ -17,9 +17,6 @@ use self::{
 pub mod control;
 pub mod qwk_message;
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Error, Debug)]
 pub enum QwkError {
     #[error("Invalid conference number ({0})")]

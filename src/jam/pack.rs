@@ -67,6 +67,7 @@ impl JamMessageBase {
 
         let mut header_reader = BufReader::new(File::open(&header_path)?);
         let mut text_reader = BufReader::new(File::open(&text_path)?);
+        let text_file_len = fs::metadata(&text_path)?.len();
 
         let tmp_header_path = temp_path(&header_path);
         let tmp_text_path = temp_path(&text_path);
@@ -106,17 +107,26 @@ impl JamMessageBase {
                     continue;
                 }
 
-                let mut text = vec![0; header.txt_len as usize];
-                text_reader.seek(SeekFrom::Start(header.offset as u64))?;
-                if let Err(err) = text_reader.read_exact(&mut text) {
+                let mut text = Vec::new();
+                // A corrupt length must not turn into a multi gigabyte allocation.
+                if header.offset as u64 + header.txt_len as u64 <= text_file_len {
+                    text.resize(header.txt_len as usize, 0);
+                    text_reader.seek(SeekFrom::Start(header.offset as u64))?;
+                    if let Err(err) = text_reader.read_exact(&mut text) {
+                        log::error!(
+                            "Message {} has no readable text, keeping the header: {err}",
+                            header.message_number
+                        );
+                        text.clear();
+                    }
+                } else {
                     log::error!(
-                        "Message {} has no readable text, keeping the header: {err}",
+                        "Message {} points outside the text file, keeping the header without text",
                         header.message_number
                     );
-                    text.clear();
                 }
 
-                header.offset = text_offset as u32;
+                header.offset = super::offset_u32(text_offset)?;
                 header.txt_len = text.len() as u32;
                 text_writer.write_all(&text)?;
                 text_offset += text.len() as u64;
@@ -127,7 +137,7 @@ impl JamMessageBase {
 
                 let crc = header.to().map_or(CRC_SEED, JamMessageBase::crc);
                 header.write(&mut header_writer)?;
-                new_slots.push(Some((crc, header_offset as u32)));
+                new_slots.push(Some((crc, super::offset_u32(header_offset)?)));
                 header_offset += header_size(&header) as u64;
                 report.kept += 1;
             }
@@ -184,7 +194,7 @@ impl JamMessageBase {
                 let crc = header.to().map_or(CRC_SEED, JamMessageBase::crc);
                 found.insert(
                     header.message_number,
-                    (crc, offset as u32, header.is_deleted()),
+                    (crc, super::offset_u32(offset)?, header.is_deleted()),
                 );
             }
             offset += header_size(&header) as u64;

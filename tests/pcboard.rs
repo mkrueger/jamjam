@@ -1,4 +1,4 @@
-use super::*;
+use jamjam::pcboard::{MessageStatus, PCBoardMessage, PCBoardMessageBase};
 use pretty_assertions::assert_eq;
 
 #[test]

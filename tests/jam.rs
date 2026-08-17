@@ -1,5 +1,8 @@
-use super::*;
-use crate::util::echomail::EchomailAddress;
+use bstr::BString;
+use jamjam::jam::msg_header::{JamMessageHeader, SubfieldType};
+use jamjam::jam::pack::PackOptions;
+use jamjam::jam::{JamMessage, JamMessageBase};
+use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -157,8 +160,6 @@ fn test_search_index_returns_message_numbers() {
 
 #[test]
 fn test_search_index_follows_the_base_message_number() {
-    use crate::jam::pack::PackOptions;
-
     let dir = TempDir::new().unwrap();
     let mut base = JamMessageBase::create(dir.path().join("search")).unwrap();
     for to in ["alice", "bob"] {

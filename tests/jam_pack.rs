@@ -1,15 +1,10 @@
 use bstr::BString;
 use chrono::{TimeZone, Utc};
+use jamjam::jam::pack::{PackOptions, PackReport};
+use jamjam::jam::{JamMessage, JamMessageBase, attributes};
+use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
-
-use crate::{
-    jam::{
-        JamMessage, JamMessageBase, attributes,
-        pack::{PackOptions, PackReport},
-    },
-    util::echomail::EchomailAddress,
-};
 
 /// Four messages, "one" to "four", all written in 1990.
 fn base(dir: &TempDir) -> JamMessageBase {

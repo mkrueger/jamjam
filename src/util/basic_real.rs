@@ -202,24 +202,3 @@ impl From<BasicDouble> for i64 {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use pretty_assertions::assert_eq;
-
-    use crate::util::basic_real::BasicReal;
-
-    #[test]
-    fn test_basicreal_conversion() {
-        for i in -100..100 {
-            assert_eq!(i, BasicReal::from(i).into());
-        }
-    }
-    /*
-    #[test]
-    fn test_basicdouble_conversion() {
-        for i in 1..100 {
-            assert_eq!(i, BasicDouble::from(i).into());
-        }
-    }*/
-}

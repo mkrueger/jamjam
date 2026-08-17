@@ -19,9 +19,6 @@ mod base_header;
 pub mod message_header;
 pub mod message_index;
 
-#[cfg(test)]
-mod tests;
-
 const FROM_TO_LEN: usize = 25;
 const PASSWORD_LEN: usize = 12;
 const DATE_LEN: usize = 8;

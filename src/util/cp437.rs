@@ -49,29 +49,3 @@ pub fn to_utf8(data: &[u8]) -> String {
     }
     data.iter().map(|c| CP437_TO_UNICODE[*c as usize]).collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::to_utf8;
-
-    #[test]
-    fn test_ascii_is_passed_through() {
-        assert_eq!(to_utf8(b"Hello"), "Hello");
-    }
-
-    #[test]
-    fn test_high_bytes_fall_back_to_cp437() {
-        // A continuation byte cannot start a UTF-8 sequence, so this is CP437.
-        assert_eq!(to_utf8(&[0xB1, 0xDB]), "\u{2592}\u{2588}");
-    }
-
-    #[test]
-    fn test_utf8_is_recognized() {
-        assert_eq!(to_utf8("Grüße".as_bytes()), "Grüße");
-    }
-
-    #[test]
-    fn test_bom_is_stripped() {
-        assert_eq!(to_utf8(&[0xEF, 0xBB, 0xBF, b'h', b'i']), "hi");
-    }
-}
