@@ -139,7 +139,7 @@ fn test_truncated_lastread_file_is_rejected() {
 fn test_text_running_past_the_file_is_rejected() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir, "text");
-    let msg = JamMessage::new(0, &EchomailAddress::default())
+    let msg = JamMessage::new(&EchomailAddress::default())
         .with_to(BString::from("all"))
         .with_text(BString::from("short"));
     base.write_message(&msg).unwrap();
@@ -159,7 +159,7 @@ fn test_text_running_past_the_file_is_rejected() {
 fn test_header_round_trip_survives_a_zero_length_message() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir, "empty");
-    let msg = JamMessage::new(0, &EchomailAddress::default()).with_to(BString::from("all"));
+    let msg = JamMessage::new(&EchomailAddress::default()).with_to(BString::from("all"));
     base.write_message(&msg).unwrap();
 
     let header: JamMessageHeader = base.read_header(1).unwrap();

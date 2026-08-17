@@ -1,7 +1,7 @@
 use bstr::BString;
 use chrono::{TimeZone, Utc};
 use jamjam::jam::pack::{PackOptions, PackReport};
-use jamjam::jam::{JamMessage, JamMessageBase, attributes};
+use jamjam::jam::{JamMessage, JamMessageBase, attributes, raw};
 use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -9,13 +9,13 @@ use tempfile::TempDir;
 /// Four messages, "one" to "four", all written in 1990.
 fn base(dir: &TempDir) -> JamMessageBase {
     let mut base = JamMessageBase::create(dir.path().join("packing")).unwrap();
-    for (no, text) in ["one", "two", "three", "four"].iter().enumerate() {
-        let msg = JamMessage::new(no as u32 + 1, &EchomailAddress::default())
+    for text in ["one", "two", "three", "four"] {
+        let msg = JamMessage::new(&EchomailAddress::default())
             .with_date_time(Utc.with_ymd_and_hms(1990, 1, 1, 0, 0, 0).unwrap())
             .with_from(BString::from("sysop"))
-            .with_to(BString::from(*text))
-            .with_subject(BString::from(*text))
-            .with_text(BString::from(*text));
+            .with_to(BString::from(text))
+            .with_subject(BString::from(text))
+            .with_text(BString::from(text));
         base.write_message(&msg).unwrap();
     }
     base.write_jhr_header().unwrap();
@@ -63,7 +63,7 @@ fn test_pack_keeps_message_numbers() {
     assert!(base.read_header(2).is_err());
 
     // The gap must not confuse the next message written into the base.
-    let msg = JamMessage::new(5, &EchomailAddress::default()).with_text(BString::from("five"));
+    let msg = JamMessage::new(&EchomailAddress::default()).with_text(BString::from("five"));
     assert_eq!(base.write_message(&msg).unwrap(), 5);
     assert_eq!(base.read_header(5).unwrap().message_number, 5);
     assert_eq!(
@@ -99,7 +99,7 @@ fn test_pack_renumbers() {
     assert_eq!(texts(&base), vec!["two", "three", "four"]);
     assert_eq!(base.read_header(1).unwrap().message_number, 1);
 
-    let msg = JamMessage::new(4, &EchomailAddress::default()).with_text(BString::from("five"));
+    let msg = JamMessage::new(&EchomailAddress::default()).with_text(BString::from("five"));
     assert_eq!(base.write_message(&msg).unwrap(), 4);
 }
 
@@ -129,7 +129,7 @@ fn test_pack_renumbers_from_a_new_low_number() {
 fn test_pack_purges_by_date() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir);
-    let msg = JamMessage::new(5, &EchomailAddress::default())
+    let msg = JamMessage::new(&EchomailAddress::default())
         .with_date_time(Utc.with_ymd_and_hms(1995, 1, 1, 0, 0, 0).unwrap())
         .with_text(BString::from("recent"));
     base.write_message(&msg).unwrap();
@@ -149,10 +149,15 @@ fn test_pack_purges_by_date() {
 fn test_pack_purges_received_private_messages() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir);
-    base.set_attributes(2, attributes::MSG_PRIVATE | attributes::MSG_READ, 0)
-        .unwrap();
+    raw::set_attributes(
+        &mut base,
+        2,
+        attributes::MSG_PRIVATE | attributes::MSG_READ,
+        0,
+    )
+    .unwrap();
     // Unread private mail stays, it is still of use to the receiver.
-    base.set_attributes(3, attributes::MSG_PRIVATE, 0).unwrap();
+    raw::set_attributes(&mut base, 3, attributes::MSG_PRIVATE, 0).unwrap();
 
     let report = base
         .pack(&PackOptions {
@@ -169,11 +174,11 @@ fn test_pack_purges_received_private_messages() {
 fn test_pack_purges_messages_whose_packout_date_arrived() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir);
-    let expired = JamMessage::new(5, &EchomailAddress::default())
+    let expired = JamMessage::new(&EchomailAddress::default())
         .with_packout_date(Utc.with_ymd_and_hms(1991, 1, 1, 0, 0, 0).unwrap())
         .with_text(BString::from("expired"));
     base.write_message(&expired).unwrap();
-    let later = JamMessage::new(6, &EchomailAddress::default())
+    let later = JamMessage::new(&EchomailAddress::default())
         .with_packout_date(Utc.with_ymd_and_hms(2999, 1, 1, 0, 0, 0).unwrap())
         .with_text(BString::from("later"));
     base.write_message(&later).unwrap();
@@ -217,7 +222,7 @@ fn test_reindex_rebuilds_a_lost_index() {
     // A header that grew was appended, so the index has to find the last copy.
     let mut header = base.read_header(2).unwrap();
     header.set_subject(BString::from("a much longer subject than before"));
-    base.update_header(2, &header).unwrap();
+    raw::update_header(&mut base, 2, &header).unwrap();
     std::fs::write(dir.path().join("packing.jdx"), []).unwrap();
 
     let report = base

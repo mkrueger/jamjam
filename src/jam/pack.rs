@@ -95,15 +95,9 @@ impl JamMessageBase {
                 report.before += 1;
 
                 header_reader.seek(SeekFrom::Start(*offset as u64))?;
-                let mut header = match JamMessageHeader::read(&mut header_reader) {
-                    Ok(header) => header,
-                    Err(err) => {
-                        log::error!("Skipping unreadable message header at offset {offset}: {err}");
-                        new_slots.push(None);
-                        report.removed += 1;
-                        continue;
-                    }
-                };
+                let mut header = JamMessageHeader::read(&mut header_reader).map_err(|err| {
+                    crate::Error::jam(*offset as u64, format!("unreadable indexed header: {err}"))
+                })?;
 
                 if should_remove(&header, options, now) {
                     new_slots.push(None);
@@ -111,24 +105,17 @@ impl JamMessageBase {
                     continue;
                 }
 
-                let mut text = Vec::new();
-                // A corrupt length must not turn into a multi gigabyte allocation.
-                if header.offset as u64 + header.txt_len as u64 <= text_file_len {
-                    text.resize(header.txt_len as usize, 0);
-                    text_reader.seek(SeekFrom::Start(header.offset as u64))?;
-                    if let Err(err) = text_reader.read_exact(&mut text) {
-                        log::error!(
-                            "Message {} has no readable text, keeping the header: {err}",
-                            header.message_number
-                        );
-                        text.clear();
-                    }
-                } else {
-                    log::error!(
-                        "Message {} points outside the text file, keeping the header without text",
-                        header.message_number
-                    );
+                let text_end = header.offset as u64 + header.txt_len as u64;
+                if text_end > text_file_len {
+                    return Err(JamError::TextOutOfBounds(
+                        header.offset as u64,
+                        text_end - text_file_len,
+                    )
+                    .into());
                 }
+                let mut text = vec![0; header.txt_len as usize];
+                text_reader.seek(SeekFrom::Start(header.offset as u64))?;
+                text_reader.read_exact(&mut text)?;
 
                 header.offset = super::offset_u32(text_offset)?;
                 header.txt_len = text.len() as u32;
@@ -206,13 +193,9 @@ impl JamMessageBase {
         let mut found: BTreeMap<u32, (u32, u32, bool)> = BTreeMap::new();
         let mut offset = JhrHeaderInfo::JHR_HEADER_SIZE;
         while offset < size {
-            let header = match JamMessageHeader::read(&mut reader) {
-                Ok(header) => header,
-                Err(err) => {
-                    log::error!("Stopping the index rebuild at offset {offset}: {err}");
-                    break;
-                }
-            };
+            let header = JamMessageHeader::read(&mut reader).map_err(|err| {
+                crate::Error::jam(offset, format!("unreadable header during reindex: {err}"))
+            })?;
             if header.message_number >= self.header_info.base_msg_num {
                 let crc = header.to().map_or(CRC_SEED, JamMessageBase::crc);
                 found.insert(
@@ -263,18 +246,18 @@ impl JamMessageBase {
         if !data.len().is_multiple_of(INDEX_RECORD_SIZE) {
             return Err(JamError::IndexFileCorrupted.into());
         }
-        Ok(data
-            .chunks_exact(INDEX_RECORD_SIZE)
-            .map(|record| {
+        data.chunks_exact(INDEX_RECORD_SIZE)
+            .enumerate()
+            .map(|(record_number, record)| {
                 let crc = u32::from_le_bytes([record[0], record[1], record[2], record[3]]);
                 let offset = u32::from_le_bytes([record[4], record[5], record[6], record[7]]);
-                if crc == EMPTY_SLOT && offset == EMPTY_SLOT {
-                    None
-                } else {
-                    Some((crc, offset))
+                match (crc == EMPTY_SLOT, offset == EMPTY_SLOT) {
+                    (true, true) => Ok(None),
+                    (false, true) => Err(JamError::InvalidIndexRecord(record_number as u64).into()),
+                    (_, false) => Ok(Some((crc, offset))),
                 }
             })
-            .collect())
+            .collect()
     }
 }
 

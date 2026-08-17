@@ -4,10 +4,13 @@ use jamjam::jam::{JamMessage, JamMessageBase};
 use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
 use std::path::Path;
+use std::sync::mpsc;
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn message(text: &str) -> JamMessage {
-    JamMessage::new(0, &EchomailAddress::default())
+    JamMessage::new(&EchomailAddress::default())
         .with_to(BString::from("all"))
         .with_text(BString::from(text))
 }
@@ -44,6 +47,49 @@ fn test_lock_excludes_another_handle() {
     base.unlock();
     assert!(other.try_lock().unwrap(), "the lock was not released");
     other.unlock();
+}
+
+#[test]
+fn test_stable_lock_survives_header_replacement() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("stable");
+    let mut base = filled(&path);
+
+    base.lock().unwrap();
+    base.pack(&PackOptions::default()).unwrap();
+
+    let (sender, receiver) = mpsc::channel();
+    let open_path = path.clone();
+    let opener = std::thread::spawn(move || {
+        sender.send(JamMessageBase::open(open_path)).unwrap();
+    });
+
+    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+    base.unlock();
+    assert!(
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok()
+    );
+    opener.join().unwrap();
+}
+
+#[test]
+fn test_alternating_handles_refresh_counters_and_numbers() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("alternating");
+    let mut first = filled(&path);
+    let mut second = JamMessageBase::open(&path).unwrap();
+
+    assert_eq!(first.write_message(&message("four")).unwrap(), 4);
+    assert_eq!(second.write_message(&message("five")).unwrap(), 5);
+    first.delete_message(1).unwrap();
+
+    let reopened = JamMessageBase::open(&path).unwrap();
+    assert_eq!(reopened.active_messages(), 4);
+    assert_eq!(reopened.highest_message_number(), 5);
+    assert_eq!(texts(&reopened), vec!["two", "three", "four", "five"]);
 }
 
 /// A mutating call has to hold the lock for its whole duration.
@@ -115,6 +161,52 @@ fn test_transaction_releases_the_lock_on_error() {
     assert_eq!(base.highest_message_number(), 5);
 }
 
+#[test]
+fn test_transaction_releases_the_lock_on_panic() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("panic");
+    let mut base = filled(&path);
+    let mut other = JamMessageBase::open(&path).unwrap();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = base.transaction::<()>(|_| panic!("injected transaction panic"));
+    }));
+    assert!(panic.is_err());
+    assert!(other.try_lock().unwrap());
+    other.unlock();
+}
+
+#[test]
+fn test_failed_append_rolls_back_text_header_and_cached_state() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rollback");
+    let mut base = filled(&path);
+    let header_path = path.with_extension("jhr");
+    let text_path = path.with_extension("jdt");
+    let index_path = path.with_extension("jdx");
+    let backup_index = path.with_extension("jdx.backup");
+    let header_len = std::fs::metadata(&header_path).unwrap().len();
+    let text_len = std::fs::metadata(&text_path).unwrap().len();
+    let mod_counter = base.mod_counter();
+
+    let result = base.transaction(|base| {
+        std::fs::rename(&index_path, &backup_index)?;
+        std::fs::create_dir(&index_path)?;
+        let result = base.write_message(&message("must roll back"));
+        std::fs::remove_dir(&index_path)?;
+        std::fs::rename(&backup_index, &index_path)?;
+        result.map(|_| ())
+    });
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::metadata(header_path).unwrap().len(), header_len);
+    assert_eq!(std::fs::metadata(text_path).unwrap().len(), text_len);
+    assert_eq!(base.active_messages(), 3);
+    assert_eq!(base.highest_message_number(), 3);
+    assert_eq!(base.mod_counter(), mod_counter);
+    assert_eq!(texts(&base), vec!["one", "two", "three"]);
+}
+
 /// A pack that dies between the renames used to leave the new text file next to
 /// the old headers, which points every message at the wrong bytes.
 #[test]
@@ -184,4 +276,45 @@ fn test_delete_message_base_removes_every_file() {
     for extension in ["jhr", "jdt", "jdx", "jlr"] {
         assert!(!path.with_extension(extension).exists());
     }
+}
+
+#[test]
+fn test_create_refuses_to_overwrite_an_existing_base() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("existing");
+    let base = filled(&path);
+    let before = texts(&base);
+    drop(base);
+
+    assert!(JamMessageBase::create(&path).is_err());
+
+    let reopened = JamMessageBase::open(path).unwrap();
+    assert_eq!(texts(&reopened), before);
+    assert_eq!(reopened.active_messages(), 3);
+}
+
+#[test]
+fn test_concurrent_create_has_one_winner() {
+    let dir = TempDir::new().unwrap();
+    let path = Arc::new(dir.path().join("concurrent-create"));
+    let barrier = Arc::new(Barrier::new(3));
+    let mut threads = Vec::new();
+
+    for _ in 0..2 {
+        let path = Arc::clone(&path);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            JamMessageBase::create(path.as_path()).is_ok()
+        }));
+    }
+    barrier.wait();
+
+    let winners = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .filter(|won| *won)
+        .count();
+    assert_eq!(winners, 1);
+    assert!(JamMessageBase::open(path.as_path()).is_ok());
 }

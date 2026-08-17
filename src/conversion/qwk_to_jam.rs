@@ -1,5 +1,5 @@
 use crate::{
-    jam::{self, JamMessage, JamMessageBase},
+    jam::{self, JamMessage, JamMessageBase, raw},
     qwk::qwk_message::QwkMessage,
     util::{cp437::to_utf8, echomail::EchomailAddress},
 };
@@ -33,7 +33,7 @@ pub fn convert_qwk_to_jam(
     let mut written = Vec::with_capacity(qwk_mail.len());
 
     for mail in qwk_mail {
-        let jam_msg = JamMessage::new(0, &aka)
+        let jam_msg = JamMessage::new(&aka)
             .with_from(to_utf8(&mail.from).into())
             .with_to(to_utf8(&mail.to).into())
             .with_subject(to_utf8(&mail.subj).into())
@@ -79,7 +79,7 @@ fn link_replies(
         if let Some(crc) = crc_by_number.get(reply_to) {
             header.reply_crc = *crc;
         }
-        jam_base.update_header(*number, &header)?;
+        raw::update_header(jam_base, *number, &header)?;
         first_reply.entry(*reply_to).or_insert(*number);
     }
 
@@ -89,7 +89,7 @@ fn link_replies(
         };
         if header.reply_first == 0 {
             header.reply_first = first;
-            jam_base.update_header(reply_to, &header)?;
+            raw::update_header(jam_base, reply_to, &header)?;
         }
     }
     Ok(())

@@ -1,13 +1,13 @@
 use bstr::BString;
 use jamjam::jam::msg_header::{JamMessageHeader, SubfieldType};
 use jamjam::jam::pack::PackOptions;
-use jamjam::jam::{JamMessage, JamMessageBase};
+use jamjam::jam::{JamMessage, JamMessageBase, attributes, raw};
 use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 fn message(text: &str, to: &str) -> JamMessage {
-    JamMessage::new(0, &EchomailAddress::default())
+    JamMessage::new(&EchomailAddress::default())
         .with_from(BString::from("sysop"))
         .with_to(BString::from(to))
         .with_subject(BString::from(text))
@@ -25,9 +25,9 @@ fn test_open_base() {
 }
 
 #[test]
-fn test_read_headers() {
+fn test_read_physical_headers() {
     let base = JamMessageBase::open("data/jam/general").unwrap();
-    let headers = base.read_headers().unwrap();
+    let headers = raw::read_physical_headers(&base).unwrap();
     assert_eq!(base.active_messages(), headers.len() as u32);
 }
 
@@ -52,9 +52,9 @@ fn test_get_text() {
 }
 
 #[test]
-fn test_iter_ra() {
+fn test_physical_headers_ra() {
     let base = JamMessageBase::open("data/jam/ra").unwrap();
-    for msg in base.iter().unwrap() {
+    for msg in raw::physical_headers(&base).unwrap() {
         let msg = msg.unwrap();
         for sub in msg.sub_fields.iter() {
             if sub.field_type() == SubfieldType::MsgID {
@@ -62,13 +62,13 @@ fn test_iter_ra() {
             }
         }
     }
-    assert_eq!(3, base.iter().unwrap().count());
+    assert_eq!(3, raw::physical_headers(&base).unwrap().count());
 }
 
 #[test]
-fn test_iter_mystic() {
+fn test_physical_headers_mystic() {
     let base = JamMessageBase::open("data/jam/general").unwrap();
-    for msg in base.iter().unwrap() {
+    for msg in raw::physical_headers(&base).unwrap() {
         let msg = msg.unwrap();
         for sub in msg.sub_fields.iter() {
             if sub.field_type() == SubfieldType::MsgID {
@@ -76,13 +76,13 @@ fn test_iter_mystic() {
             }
         }
     }
-    assert_eq!(4, base.iter().unwrap().count());
+    assert_eq!(4, raw::physical_headers(&base).unwrap().count());
 }
 
 #[test]
-fn test_iter_elebbs() {
+fn test_physical_headers_elebbs() {
     let base = JamMessageBase::open("data/jam/elebbs").unwrap();
-    for msg in base.iter().unwrap() {
+    for msg in raw::physical_headers(&base).unwrap() {
         let msg = msg.unwrap();
         for sub in msg.sub_fields.iter() {
             if sub.field_type() == SubfieldType::MsgID {
@@ -90,7 +90,7 @@ fn test_iter_elebbs() {
             }
         }
     }
-    assert_eq!(4, base.iter().unwrap().count());
+    assert_eq!(4, raw::physical_headers(&base).unwrap().count());
 }
 
 /// `ActiveMsgs` counts the messages that are not deleted, it is not the highest
@@ -240,7 +240,7 @@ fn test_update_header_retires_the_old_record() {
 
     let mut header = base.read_header(1).unwrap();
     header.set_subject(BString::from("a much longer subject than before"));
-    base.update_header(1, &header).unwrap();
+    raw::update_header(&mut base, 1, &header).unwrap();
 
     assert_eq!(
         base.read_header(1).unwrap().subject().unwrap(),
@@ -252,7 +252,96 @@ fn test_update_header_retires_the_old_record() {
         "one"
     );
 
-    let retired = base.iter().unwrap().next().unwrap().unwrap();
+    let retired = raw::physical_headers(&base)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
     assert!(retired.is_deleted());
     assert_eq!(retired.txt_len, 0);
+}
+
+#[test]
+fn test_set_attributes_updates_mod_counter_and_active_count() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("attributes");
+    let mut base = JamMessageBase::create(&path).unwrap();
+    base.write_message(&message("one", "all")).unwrap();
+    base.write_message(&message("two", "all")).unwrap();
+    let before = base.mod_counter();
+
+    assert!(raw::set_attributes(&mut base, 1, attributes::MSG_PRIVATE, 0).unwrap());
+    assert_eq!(base.active_messages(), 2);
+    assert_eq!(base.mod_counter(), before.wrapping_add(1));
+
+    assert!(raw::set_attributes(&mut base, 1, attributes::MSG_DELETED, 0).unwrap());
+    assert_eq!(base.active_messages(), 1);
+    assert_eq!(base.mod_counter(), before.wrapping_add(2));
+
+    // A no-op does not pretend that the base changed.
+    assert!(!raw::set_attributes(&mut base, 1, attributes::MSG_DELETED, 0).unwrap());
+    assert_eq!(base.mod_counter(), before.wrapping_add(2));
+
+    assert!(raw::set_attributes(&mut base, 1, 0, attributes::MSG_DELETED).unwrap());
+    assert_eq!(base.active_messages(), 2);
+    assert_eq!(base.mod_counter(), before.wrapping_add(3));
+
+    let reopened = JamMessageBase::open(path).unwrap();
+    assert_eq!(reopened.active_messages(), 2);
+    assert_eq!(reopened.mod_counter(), before.wrapping_add(3));
+}
+
+#[test]
+fn test_update_header_preserves_number_and_deletion_invariants() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("update-invariants");
+    let mut base = JamMessageBase::create(&path).unwrap();
+    base.write_message(&message("one", "all")).unwrap();
+    base.write_message(&message("two", "all")).unwrap();
+    let before = base.mod_counter();
+
+    let mut header = base.read_header(1).unwrap();
+    header.message_number = 999;
+    header.set_deleted(true);
+    raw::update_header(&mut base, 1, &header).unwrap();
+
+    assert_eq!(base.active_messages(), 1);
+    assert_eq!(base.mod_counter(), before.wrapping_add(1));
+    assert!(base.read_header(1).is_err());
+
+    base.restore_message(1).unwrap();
+    let restored = base.read_header(1).unwrap();
+    assert_eq!(restored.message_number, 1);
+    assert_eq!(base.active_messages(), 2);
+    assert_eq!(base.mod_counter(), before.wrapping_add(2));
+}
+
+#[test]
+fn test_messages_returns_only_live_indexed_headers_in_number_order() {
+    let dir = TempDir::new().unwrap();
+    let mut base = JamMessageBase::create(dir.path().join("messages")).unwrap();
+    for text in ["one", "two", "three"] {
+        base.write_message(&message(text, "all")).unwrap();
+    }
+    base.delete_message(2).unwrap();
+
+    let mut first = base.read_header(1).unwrap();
+    first.set_subject(BString::from("replacement"));
+    raw::update_header(&mut base, 1, &first).unwrap();
+
+    let live: Vec<_> = base.messages().collect::<jamjam::Result<_>>().unwrap();
+    assert_eq!(
+        live.iter()
+            .map(|header| header.message_number)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    assert_eq!(live[0].subject().unwrap(), "replacement");
+
+    let physical: Vec<_> = raw::physical_headers(&base)
+        .unwrap()
+        .collect::<jamjam::Result<_>>()
+        .unwrap();
+    assert_eq!(physical.len(), 4);
+    assert!(physical[0].is_deleted());
 }

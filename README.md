@@ -33,7 +33,7 @@ use jamjam::util::echomail::EchomailAddress;
 
 let mut base = JamMessageBase::create("mybase")?;
 let number = base.write_message(
-    &JamMessage::new(0, &EchomailAddress::default())
+    &JamMessage::new(&EchomailAddress::default())
         .with_from("sysop".into())
         .with_to("all".into())
         .with_subject("hello".into())
@@ -44,6 +44,11 @@ let header = base.read_header(number)?;
 println!("{}", base.read_message_text(&header)?);
 # Ok::<(), jamjam::Error>(())
 ```
+
+Use `base.messages()` to walk the current live messages in message-number
+order. Low-level operations that expose retired physical JHR records or mutate
+raw header data live under `jamjam::jam::raw`; they are intended for diagnostics,
+conversion and repair tools rather than normal message-base access.
 
 ### JAM copyright
 

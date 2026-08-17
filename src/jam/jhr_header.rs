@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File},
+    fs::{File, OpenOptions},
     io::{BufWriter, Read, Seek, Write},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -11,7 +11,7 @@ use crate::jam::{JAM_SIGNATURE, JamError};
 /// .JHR files.
 ///
 /// The first actual message header starts at offset 1024 in the .JHR file.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct JhrHeaderInfo {
     /// `<J><A><M>` followed by `<NUL>`
     //pub signature: u32,
@@ -82,13 +82,21 @@ impl JhrHeaderInfo {
         result.extend(&passwordcrc.to_le_bytes());
         result.extend(&1u32.to_le_bytes());
         result.resize(Self::JHR_HEADER_SIZE as usize, 0);
-        fs::write(file_name, result)?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(file_name)?;
+        file.write_all(&result)?;
         Ok(())
     }
 
     pub(crate) fn update(&mut self, file: &mut BufWriter<File>) -> crate::Result<()> {
-        file.seek(std::io::SeekFrom::Start(8))?;
         self.mod_counter = self.mod_counter.wrapping_add(1);
+        self.store(file)
+    }
+
+    pub(crate) fn store(&self, file: &mut BufWriter<File>) -> crate::Result<()> {
+        file.seek(std::io::SeekFrom::Start(8))?;
         file.write_all(&self.mod_counter.to_le_bytes())?;
         file.write_all(&self.active_msgs.to_le_bytes())?;
         file.write_all(&self.password_crc.to_le_bytes())?;

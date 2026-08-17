@@ -11,7 +11,7 @@ pub fn main() {
 
     let base = JamMessageBase::open(&args[1]).unwrap();
 
-    for header in base.iter().unwrap().flatten() {
+    for header in base.messages().flatten() {
         println!(
             "From:{:40}  Number:{}/{}",
             header.from().unwrap(),
