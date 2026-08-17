@@ -146,6 +146,31 @@ fn test_pack_rejects_a_half_empty_index_record() {
 }
 
 #[test]
+fn test_renumber_rejects_truncated_lastread_before_commit() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("lastread");
+    let mut base = filled(&path);
+    std::fs::write(path.with_extension("jlr"), [0u8; 20]).unwrap();
+    let messages_before = snapshot(&path);
+    let lastread_before = std::fs::read(path.with_extension("jlr")).unwrap();
+
+    let result = base.pack(&PackOptions {
+        renumber_from: Some(500),
+        ..Default::default()
+    });
+
+    assert!(result.is_err());
+    assert_unchanged(&path, &messages_before);
+    assert_eq!(
+        std::fs::read(path.with_extension("jlr")).unwrap(),
+        lastread_before
+    );
+    assert_eq!(base.lowest_message_number(), 1);
+    assert_eq!(base.highest_message_number(), 3);
+    assert!(!path.with_extension("jampack").exists());
+}
+
+#[test]
 fn test_reindex_rejects_a_truncated_header_without_rewriting_index() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("reindex");

@@ -1,4 +1,5 @@
 use bstr::BString;
+use jamjam::jam::last_read_storage::JamLastReadStorage;
 use jamjam::jam::pack::PackOptions;
 use jamjam::jam::{JamMessage, JamMessageBase};
 use jamjam::util::echomail::EchomailAddress;
@@ -310,6 +311,44 @@ fn test_interrupted_pack_is_completed_on_open() {
 }
 
 #[test]
+fn test_interrupted_renumber_finishes_lastread_on_open() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("lastread-crash");
+    let mut base = filled(&path);
+    base.write_last_read(&JamLastReadStorage {
+        user_crc: 1,
+        user_id: 2,
+        last_read_msg: 3,
+        high_read_msg: 3,
+    })
+    .unwrap();
+    let old_lastread = std::fs::read(path.with_extension("jlr")).unwrap();
+
+    base.pack(&PackOptions {
+        renumber_from: Some(500),
+        ..Default::default()
+    })
+    .unwrap();
+    let remapped_lastread = std::fs::read(path.with_extension("jlr")).unwrap();
+    drop(base);
+
+    // Recreate a crash after JDT/JHR/JDX were moved but before JLR was moved.
+    std::fs::write(path.with_extension("jlr"), old_lastread).unwrap();
+    std::fs::write(path.with_extension("jlr.packing"), remapped_lastread).unwrap();
+    std::fs::write(path.with_extension("jampack"), b"jamjam pack in progress\n").unwrap();
+
+    let base = JamMessageBase::open(&path).unwrap();
+    let lastread = base.find_last_read(1, 2).unwrap().unwrap();
+
+    assert_eq!(base.lowest_message_number(), 500);
+    assert_eq!(base.highest_message_number(), 502);
+    assert_eq!(lastread.last_read_msg, 502);
+    assert_eq!(lastread.high_read_msg, 502);
+    assert!(!path.with_extension("jampack").exists());
+    assert!(!path.with_extension("jlr.packing").exists());
+}
+
+#[test]
 fn test_pack_leaves_no_marker_behind() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("clean");
@@ -318,6 +357,7 @@ fn test_pack_leaves_no_marker_behind() {
 
     assert!(!path.with_extension("jampack").exists());
     assert!(!path.with_extension("jdt.packing").exists());
+    assert!(!path.with_extension("jlr.packing").exists());
 }
 
 #[test]

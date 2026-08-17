@@ -76,6 +76,8 @@ impl JamMessageBase {
         let tmp_header_path = temp_path(&header_path);
         let tmp_text_path = temp_path(&text_path);
         let tmp_index_path = temp_path(&self.file_path(extensions::MESSAGE_INDEX));
+        let lastread_path = self.file_path(extensions::LASTREAD_INFO);
+        let tmp_lastread_path = temp_path(&lastread_path);
 
         let mut report = PackReport::default();
         let mut new_slots: Vec<Slot> = Vec::with_capacity(slots.len());
@@ -145,19 +147,31 @@ impl JamMessageBase {
         } else {
             (self.header_info.base_msg_num, new_slots)
         };
+        let packed_lastread = if options.renumber_from.is_some() {
+            self.remapped_last_read(&number_map)?
+        } else {
+            match fs::read(&lastread_path) {
+                Ok(data) => data,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(err) => return Err(err.into()),
+            }
+        };
 
         fs::write(&tmp_index_path, index_bytes(&index))?;
-        self.header_info.base_msg_num = base_msg_num;
-        self.header_info.active_msgs = report.kept;
-        self.index_records = index.len() as u32;
-        write_base_header(&tmp_header_path, &mut self.header_info)?;
+        fs::write(&tmp_lastread_path, packed_lastread)?;
+        let mut packed_header_info = self.header_info.clone();
+        packed_header_info.base_msg_num = base_msg_num;
+        packed_header_info.active_msgs = report.kept;
+        let packed_index_records = index.len() as u32;
+        write_base_header(&tmp_header_path, &mut packed_header_info)?;
 
-        // The three files only make sense together, but they can only be moved
+        // The staged files only make sense together, but they can only be moved
         // into place one at a time. Get them onto the disk first, then leave a
         // marker so that an interrupted run can be finished on the next open.
         sync_file(&tmp_text_path)?;
         sync_file(&tmp_header_path)?;
         sync_file(&tmp_index_path)?;
+        sync_file(&tmp_lastread_path)?;
 
         let marker = pack_marker(&self.file_name);
         fs::write(&marker, PACK_MARKER_CONTENT)?;
@@ -167,12 +181,12 @@ impl JamMessageBase {
         fs::rename(&tmp_text_path, &text_path)?;
         fs::rename(&tmp_header_path, &header_path)?;
         fs::rename(&tmp_index_path, self.file_path(extensions::MESSAGE_INDEX))?;
+        fs::rename(&tmp_lastread_path, &lastread_path)?;
         sync_dir(&self.file_name);
+        self.header_info = packed_header_info;
+        self.index_records = packed_index_records;
         fs::remove_file(&marker)?;
         sync_dir(&self.file_name);
-        if options.renumber_from.is_some() {
-            self.remap_last_read(&number_map)?;
-        }
 
         report.low_message_number = self.lowest_message_number();
         report.high_message_number = self.highest_message_number();
@@ -181,9 +195,8 @@ impl JamMessageBase {
 
     /// Rewrites last-read pointers after a renumber, mapping each old number
     /// onto the new one or the nearest surviving predecessor.
-    fn remap_last_read(&mut self, map: &BTreeMap<u32, u32>) -> crate::Result<()> {
+    fn remapped_last_read(&self, map: &BTreeMap<u32, u32>) -> crate::Result<Vec<u8>> {
         let mut records = self.read_last_read_file()?;
-        let mut changed = false;
         for record in &mut records {
             if record.user_crc == u32::MAX && record.user_id == u32::MAX {
                 continue;
@@ -199,17 +212,13 @@ impl JamMessageBase {
             if last_read_msg != record.last_read_msg || high_read_msg != record.high_read_msg {
                 record.last_read_msg = last_read_msg;
                 record.high_read_msg = high_read_msg;
-                changed = true;
             }
         }
-        if changed {
-            let mut data = Vec::with_capacity(records.len() * super::LASTREAD_RECORD_SIZE);
-            for record in &records {
-                record.write(&mut data)?;
-            }
-            self.store_last_read_records(&data)?;
+        let mut data = Vec::with_capacity(records.len() * super::LASTREAD_RECORD_SIZE);
+        for record in &records {
+            record.write(&mut data)?;
         }
-        Ok(())
+        Ok(data)
     }
 
     /// Rebuilds the index from the message headers, PCBPack's `/INDEX`. Useful
@@ -352,7 +361,7 @@ pub(crate) fn sync_dir(file_name: &Path) {
     }
 }
 
-/// Finishes a pack that was cut short before all three files were in place.
+/// Finishes a pack that was cut short before all staged files were in place.
 ///
 /// The temporaries are complete and consistent by the time the marker appears,
 /// so whichever ones have not been moved yet can simply be moved now.
@@ -366,6 +375,7 @@ pub(crate) fn recover_interrupted_pack(file_name: &Path) -> crate::Result<()> {
         extensions::TEXT_DATA,
         extensions::HEADER_DATA,
         extensions::MESSAGE_INDEX,
+        extensions::LASTREAD_INFO,
     ] {
         let target = file_name.with_extension(extension);
         let tmp = temp_path(&target);
