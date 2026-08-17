@@ -55,7 +55,7 @@ pub fn convert_qwk_to_jam(
 
 /// Second pass, a reply target is only known once every message has a number.
 fn link_replies(
-    jam_base: &JamMessageBase,
+    jam_base: &mut JamMessageBase,
     written: &[(u32, u32, u32)],
     number_map: &HashMap<u32, u32>,
 ) -> crate::Result<()> {

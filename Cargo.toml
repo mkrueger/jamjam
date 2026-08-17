@@ -2,7 +2,8 @@
 name = "jamjam"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.88"
+# 1.89 stabilised std::fs::File::lock, used to guard the message base.
+rust-version = "1.89"
 description = "Handles JAM, PCBOARD message bases & QWK packets."
 authors = ["Mike Krüger <mkrueger@posteo.de>"]
 homepage = "https://github.com/mkrueger/jamjam"

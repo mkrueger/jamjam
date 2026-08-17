@@ -23,7 +23,7 @@ fn storage(user_crc: u32, user_id: u32, last_read: u32) -> JamLastReadStorage {
 #[test]
 fn test_write_last_read_without_a_previous_lookup() {
     let dir = TempDir::new().unwrap();
-    let base = base(&dir, "lr");
+    let mut base = base(&dir, "lr");
 
     base.write_last_read(&storage(111, 222, 7)).unwrap();
 
@@ -37,7 +37,7 @@ fn test_write_last_read_without_a_previous_lookup() {
 #[test]
 fn test_write_last_read_updates_in_place() {
     let dir = TempDir::new().unwrap();
-    let base = base(&dir, "lr");
+    let mut base = base(&dir, "lr");
     base.write_last_read(&storage(1, 1, 10)).unwrap();
     base.write_last_read(&storage(2, 2, 20)).unwrap();
     base.write_last_read(&storage(3, 3, 30)).unwrap();
@@ -64,7 +64,7 @@ fn test_write_last_read_updates_in_place() {
 #[test]
 fn test_interleaved_users_keep_their_own_record() {
     let dir = TempDir::new().unwrap();
-    let base = base(&dir, "lr");
+    let mut base = base(&dir, "lr");
     base.create_last_read(10, 1).unwrap();
     base.create_last_read(20, 2).unwrap();
 
@@ -89,7 +89,7 @@ fn test_interleaved_users_keep_their_own_record() {
 #[test]
 fn test_create_last_read_is_idempotent() {
     let dir = TempDir::new().unwrap();
-    let base = base(&dir, "lr");
+    let mut base = base(&dir, "lr");
     base.create_last_read(7, 8).unwrap();
     base.write_last_read(&storage(7, 8, 33)).unwrap();
 
@@ -101,7 +101,7 @@ fn test_create_last_read_is_idempotent() {
 #[test]
 fn test_missing_user_is_none() {
     let dir = TempDir::new().unwrap();
-    let base = base(&dir, "lr");
+    let mut base = base(&dir, "lr");
     base.create_last_read(1, 1).unwrap();
 
     assert!(base.find_last_read(2, 2).unwrap().is_none());
@@ -110,7 +110,7 @@ fn test_missing_user_is_none() {
 #[test]
 fn test_deleted_record_is_not_found() {
     let dir = TempDir::new().unwrap();
-    let base = base(&dir, "lr");
+    let mut base = base(&dir, "lr");
     base.write_last_read(&storage(1, 1, 5)).unwrap();
 
     assert!(base.delete_last_read(1, 1).unwrap());
@@ -126,7 +126,7 @@ fn test_deleted_record_is_not_found() {
 fn test_truncated_lastread_file_is_rejected() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("lr");
-    let base = JamMessageBase::create(&path).unwrap();
+    let mut base = JamMessageBase::create(&path).unwrap();
     base.write_last_read(&storage(1, 1, 1)).unwrap();
 
     std::fs::write(path.with_extension("jlr"), [0u8; 20]).unwrap();

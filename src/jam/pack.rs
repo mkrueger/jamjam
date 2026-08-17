@@ -56,8 +56,12 @@ impl JamMessageBase {
     /// Unless the base is renumbered the message numbers of the surviving
     /// messages do not change, so last-read pointers stay valid.
     pub fn pack(&mut self, options: &PackOptions) -> crate::Result<PackReport> {
+        self.transaction(|base| base.pack_locked(options))
+    }
+
+    fn pack_locked(&mut self, options: &PackOptions) -> crate::Result<PackReport> {
         if options.index_only {
-            return self.reindex();
+            return self.reindex_locked();
         }
         let now = Utc::now();
 
@@ -158,9 +162,24 @@ impl JamMessageBase {
         self.index_records = index.len() as u32;
         write_base_header(&tmp_header_path, &mut self.header_info)?;
 
+        // The three files only make sense together, but they can only be moved
+        // into place one at a time. Get them onto the disk first, then leave a
+        // marker so that an interrupted run can be finished on the next open.
+        sync_file(&tmp_text_path)?;
+        sync_file(&tmp_header_path)?;
+        sync_file(&tmp_index_path)?;
+
+        let marker = pack_marker(&self.file_name);
+        fs::write(&marker, PACK_MARKER_CONTENT)?;
+        sync_file(&marker)?;
+        sync_dir(&self.file_name);
+
         fs::rename(&tmp_text_path, &text_path)?;
         fs::rename(&tmp_header_path, &header_path)?;
         fs::rename(&tmp_index_path, self.file_path(extensions::MESSAGE_INDEX))?;
+        sync_dir(&self.file_name);
+        fs::remove_file(&marker)?;
+        sync_dir(&self.file_name);
 
         report.low_message_number = self.lowest_message_number();
         report.high_message_number = self.highest_message_number();
@@ -172,6 +191,10 @@ impl JamMessageBase {
     ///
     /// Deleted messages keep their slot so they can still be recovered.
     pub fn reindex(&mut self) -> crate::Result<PackReport> {
+        self.transaction(|base| base.reindex_locked())
+    }
+
+    fn reindex_locked(&mut self) -> crate::Result<PackReport> {
         let header_path = self.file_path(extensions::HEADER_DATA);
         let file = File::open(&header_path)?;
         let size = file.metadata()?.len();
@@ -213,6 +236,7 @@ impl JamMessageBase {
 
         let tmp_index_path = temp_path(&self.file_path(extensions::MESSAGE_INDEX));
         fs::write(&tmp_index_path, index_bytes(&index))?;
+        sync_file(&tmp_index_path)?;
         fs::rename(&tmp_index_path, self.file_path(extensions::MESSAGE_INDEX))?;
 
         let active = found.values().filter(|(_, _, deleted)| !deleted).count() as u32;
@@ -273,10 +297,64 @@ fn index_bytes(slots: &[Slot]) -> Vec<u8> {
     data
 }
 
+/// Written while the packed files are moved into place, so an interrupted run
+/// can be spotted and finished.
+const PACK_MARKER_CONTENT: &[u8] = b"jamjam pack in progress\n";
+
+fn pack_marker(file_name: &Path) -> PathBuf {
+    file_name.with_extension("jampack")
+}
+
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".packing");
     PathBuf::from(name)
+}
+
+fn sync_file(path: &Path) -> crate::Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .truncate(false)
+        .open(path)?
+        .sync_all()?;
+    Ok(())
+}
+
+/// Renames are only durable once the directory entry is on the disk. Platforms
+/// that do not allow opening a directory simply skip this.
+pub(crate) fn sync_dir(file_name: &Path) {
+    if let Some(parent) = file_name.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+}
+
+/// Finishes a pack that was cut short before all three files were in place.
+///
+/// The temporaries are complete and consistent by the time the marker appears,
+/// so whichever ones have not been moved yet can simply be moved now.
+pub(crate) fn recover_interrupted_pack(file_name: &Path) -> crate::Result<()> {
+    let marker = pack_marker(file_name);
+    if !marker.exists() {
+        return Ok(());
+    }
+    log::warn!("Completing an interrupted pack of {}", file_name.display());
+    for extension in [
+        extensions::TEXT_DATA,
+        extensions::HEADER_DATA,
+        extensions::MESSAGE_INDEX,
+    ] {
+        let target = file_name.with_extension(extension);
+        let tmp = temp_path(&target);
+        if tmp.exists() {
+            fs::rename(&tmp, &target)?;
+        }
+    }
+    sync_dir(file_name);
+    fs::remove_file(&marker)?;
+    sync_dir(file_name);
+    Ok(())
 }
 
 /// Writes the 1024 byte record the packed header file starts with.
