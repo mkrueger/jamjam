@@ -32,7 +32,7 @@ pub struct PackOptions {
     pub purge_received_private: bool,
 
     /// Renumber the kept messages starting at this number (`/RENUMBER`).
-    /// Like the original, last-read pointers are not adjusted.
+    /// Last-read pointers are remapped onto the new numbers.
     pub renumber_from: Option<u32>,
 }
 
@@ -79,6 +79,7 @@ impl JamMessageBase {
 
         let mut report = PackReport::default();
         let mut new_slots: Vec<Slot> = Vec::with_capacity(slots.len());
+        let mut number_map: BTreeMap<u32, u32> = BTreeMap::new();
         let mut header_offset = JhrHeaderInfo::JHR_HEADER_SIZE;
         let mut text_offset = 0u64;
 
@@ -122,9 +123,11 @@ impl JamMessageBase {
                 text_writer.write_all(&text)?;
                 text_offset += text.len() as u64;
 
+                let old_number = header.message_number;
                 if let Some(first) = options.renumber_from {
                     header.message_number = first + report.kept;
                 }
+                number_map.insert(old_number, header.message_number);
 
                 let crc = header.to().map_or(CRC_SEED, JamMessageBase::crc);
                 header.write(&mut header_writer)?;
@@ -167,10 +170,46 @@ impl JamMessageBase {
         sync_dir(&self.file_name);
         fs::remove_file(&marker)?;
         sync_dir(&self.file_name);
+        if options.renumber_from.is_some() {
+            self.remap_last_read(&number_map)?;
+        }
 
         report.low_message_number = self.lowest_message_number();
         report.high_message_number = self.highest_message_number();
         Ok(report)
+    }
+
+    /// Rewrites last-read pointers after a renumber, mapping each old number
+    /// onto the new one or the nearest surviving predecessor.
+    fn remap_last_read(&mut self, map: &BTreeMap<u32, u32>) -> crate::Result<()> {
+        let mut records = self.read_last_read_file()?;
+        let mut changed = false;
+        for record in &mut records {
+            if record.user_crc == u32::MAX && record.user_id == u32::MAX {
+                continue;
+            }
+            let mapped = |number: u32| {
+                map.get(&number)
+                    .copied()
+                    .or_else(|| map.range(..=number).next_back().map(|(_, kept)| *kept))
+                    .unwrap_or(0)
+            };
+            let last_read_msg = mapped(record.last_read_msg);
+            let high_read_msg = mapped(record.high_read_msg);
+            if last_read_msg != record.last_read_msg || high_read_msg != record.high_read_msg {
+                record.last_read_msg = last_read_msg;
+                record.high_read_msg = high_read_msg;
+                changed = true;
+            }
+        }
+        if changed {
+            let mut data = Vec::with_capacity(records.len() * super::LASTREAD_RECORD_SIZE);
+            for record in &records {
+                record.write(&mut data)?;
+            }
+            self.store_last_read_records(&data)?;
+        }
+        Ok(())
     }
 
     /// Rebuilds the index from the message headers, PCBPack's `/INDEX`. Useful
@@ -181,7 +220,7 @@ impl JamMessageBase {
         self.transaction(|base| base.reindex_locked())
     }
 
-    fn reindex_locked(&mut self) -> crate::Result<PackReport> {
+    pub(crate) fn reindex_locked(&mut self) -> crate::Result<PackReport> {
         let header_path = self.file_path(extensions::HEADER_DATA);
         let file = File::open(&header_path)?;
         let size = file.metadata()?.len();
@@ -294,7 +333,7 @@ fn temp_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn sync_file(path: &Path) -> crate::Result<()> {
+pub(crate) fn sync_file(path: &Path) -> crate::Result<()> {
     OpenOptions::new()
         .write(true)
         .truncate(false)

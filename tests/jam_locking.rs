@@ -50,6 +50,71 @@ fn test_lock_excludes_another_handle() {
 }
 
 #[test]
+fn test_shared_locks_allow_several_readers() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("shared");
+    let mut first = filled(&path);
+    let mut second = JamMessageBase::open(&path).unwrap();
+    let mut writer = JamMessageBase::open(&path).unwrap();
+
+    first.lock_shared().unwrap();
+    assert!(second.try_lock_shared().unwrap());
+    assert!(!writer.try_lock().unwrap(), "a writer slipped past readers");
+    assert_eq!(first.active_messages(), 3);
+    assert_eq!(second.active_messages(), 3);
+
+    first.unlock();
+    second.unlock();
+    assert!(writer.try_lock().unwrap());
+    writer.unlock();
+}
+
+#[test]
+fn test_exclusive_lock_blocks_shared_readers() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("exclusive");
+    let mut writer = filled(&path);
+    let mut reader = JamMessageBase::open(&path).unwrap();
+
+    writer.lock().unwrap();
+    assert!(!reader.try_lock_shared().unwrap());
+    writer.unlock();
+    assert!(reader.try_lock_shared().unwrap());
+    reader.unlock();
+}
+
+#[test]
+fn test_shared_lock_cannot_be_upgraded() {
+    let dir = TempDir::new().unwrap();
+    let mut base = filled(&dir.path().join("upgrade"));
+
+    base.lock_shared().unwrap();
+    let err = base.write_message(&message("four")).unwrap_err();
+    match err {
+        jamjam::Error::Jam(jamjam::jam::JamError::LockUpgrade) => {}
+        other => panic!("expected LockUpgrade, got {other}"),
+    }
+    base.unlock();
+    assert_eq!(base.write_message(&message("four")).unwrap(), 4);
+}
+
+#[test]
+fn test_read_transaction_refreshes_and_releases() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("snapshot");
+    let mut writer = filled(&path);
+    let mut reader = JamMessageBase::open(&path).unwrap();
+
+    writer.write_message(&message("four")).unwrap();
+    let count = reader
+        .read_transaction(|base| Ok(base.active_messages()))
+        .unwrap();
+    assert_eq!(count, 4);
+    assert!(writer.try_lock().unwrap());
+    writer.unlock();
+}
+
+#[test]
 fn test_stable_lock_survives_header_replacement() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("stable");

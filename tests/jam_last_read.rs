@@ -1,6 +1,7 @@
 use bstr::BString;
 use jamjam::jam::last_read_storage::JamLastReadStorage;
 use jamjam::jam::msg_header::JamMessageHeader;
+use jamjam::jam::pack::PackOptions;
 use jamjam::jam::{JamMessage, JamMessageBase};
 use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
@@ -120,6 +121,36 @@ fn test_deleted_record_is_not_found() {
     // The slot stays, a new record for the user is appended after it.
     base.write_last_read(&storage(1, 1, 9)).unwrap();
     assert_eq!(base.find_last_read(1, 1).unwrap().unwrap().last_read_msg, 9);
+}
+
+#[test]
+fn test_pack_renumber_remaps_last_read_pointers() {
+    let dir = TempDir::new().unwrap();
+    let mut base = base(&dir, "remap");
+    for text in ["one", "two", "three"] {
+        base.write_message(
+            &JamMessage::new(&EchomailAddress::default())
+                .with_to(BString::from("all"))
+                .with_text(BString::from(text)),
+        )
+        .unwrap();
+    }
+    base.delete_message(2).unwrap();
+    base.write_last_read(&storage(1, 1, 3)).unwrap();
+    base.write_last_read(&storage(2, 2, 2)).unwrap();
+
+    base.pack(&PackOptions {
+        renumber_from: Some(500),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let first = base.find_last_read(1, 1).unwrap().unwrap();
+    let second = base.find_last_read(2, 2).unwrap().unwrap();
+    assert_eq!(first.last_read_msg, 501);
+    assert_eq!(first.high_read_msg, 501);
+    assert_eq!(second.last_read_msg, 500);
+    assert_eq!(second.high_read_msg, 500);
 }
 
 #[test]

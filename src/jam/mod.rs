@@ -23,6 +23,7 @@ pub mod last_read_storage;
 pub mod msg_header;
 pub mod pack;
 pub mod raw;
+pub mod verify;
 
 #[derive(Error, Debug)]
 pub enum JamError {
@@ -67,6 +68,11 @@ pub enum JamError {
 
     #[error("Lastread file corrupted, {0} bytes is not a whole number of records")]
     LastReadFileCorrupted(u64),
+
+    #[error(
+        "a shared message base lock cannot be upgraded, take the exclusive lock before reading"
+    )]
+    LockUpgrade,
 }
 
 /// JAM stores every file offset in a `ulong`, so a base cannot grow past 4 GB.
@@ -97,13 +103,22 @@ const JAM_SIGNATURE: [u8; 4] = [b'J', b'A', b'M', 0];
 pub(crate) const INDEX_RECORD_SIZE: usize = 8;
 
 /// Four ulongs: user CRC, user id, last read and high read message number.
-const LASTREAD_RECORD_SIZE: usize = 16;
+pub(crate) const LASTREAD_RECORD_SIZE: usize = 16;
 
 /// "If the lastread record is deleted, UserCRC and UserID are both set to -1."
-const LASTREAD_DELETED: [u8; 8] = [0xFF; 8];
+pub(crate) const LASTREAD_DELETED: [u8; 8] = [0xFF; 8];
 
 /// Below this many index records a plain scan beats spawning rayon tasks.
 const PARALLEL_SEARCH_THRESHOLD: usize = 8192;
+
+/// Which kind of advisory lock the base currently holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LockMode {
+    /// Several programs may read at the same time.
+    Shared,
+    /// One program may mutate, nobody else may read or mutate.
+    Exclusive,
+}
 
 pub struct JamMessageBase {
     file_name: PathBuf,
@@ -113,6 +128,7 @@ pub struct JamMessageBase {
     /// Held open for the whole lifetime, the .JHR file is the lock token.
     lock_file: File,
     lock_depth: u32,
+    lock_mode: LockMode,
 }
 
 impl JamMessageBase {
@@ -143,6 +159,7 @@ impl JamMessageBase {
             index_records: 0,
             lock_file,
             lock_depth: 1,
+            lock_mode: LockMode::Exclusive,
         };
         base.index_records = base.count_index_records()?;
         base.unlock();
@@ -320,28 +337,27 @@ impl JamMessageBase {
         Ok(())
     }
 
-    /// Takes the advisory lock that guards the message base.
+    /// Takes the exclusive advisory lock that guards the message base.
     ///
     /// JAM bases are shared between programs, so this is a real file lock and
     /// not just a flag. Every mutating call takes it on its own; use this to
     /// hold it across a group of them. Calls nest, and the lock is released
-    /// when the outermost one is undone.
+    /// when the outermost one is undone. Readers that only need a consistent
+    /// snapshot should use [`Self::lock_shared`] instead.
     pub fn lock(&mut self) -> crate::Result<()> {
-        if self.lock_depth == 0 {
-            self.lock_file.lock()?;
-            if let Err(err) = self.refresh_state() {
-                let _ = self.lock_file.unlock();
-                return Err(err);
-            }
-        }
-        self.lock_depth = self
-            .lock_depth
-            .checked_add(1)
-            .ok_or_else(|| crate::Error::jam(0, "message base lock depth overflow"))?;
-        Ok(())
+        self.acquire(LockMode::Exclusive, true).map(|_| ())
     }
 
-    /// Releases one level of [`Self::lock`].
+    /// Takes a shared lock, which other readers may hold at the same time.
+    ///
+    /// Writers are excluded for as long as any reader holds it. A shared lock
+    /// cannot be upgraded, so mutating calls made while one is held fail with
+    /// [`JamError::LockUpgrade`] instead of writing without exclusive access.
+    pub fn lock_shared(&mut self) -> crate::Result<()> {
+        self.acquire(LockMode::Shared, true).map(|_| ())
+    }
+
+    /// Releases one level of [`Self::lock`] or [`Self::lock_shared`].
     pub fn unlock(&mut self) {
         if self.lock_depth == 0 {
             return;
@@ -356,16 +372,32 @@ impl JamMessageBase {
 
     /// Takes the lock without waiting, returning false if another program holds it.
     pub fn try_lock(&mut self) -> crate::Result<bool> {
-        if self.lock_depth == 0 {
-            match self.lock_file.try_lock() {
-                Ok(()) => {}
-                Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
-                Err(std::fs::TryLockError::Error(err)) => return Err(err.into()),
+        self.acquire(LockMode::Exclusive, false)
+    }
+
+    /// Takes the shared lock without waiting, returning false if a writer holds it.
+    pub fn try_lock_shared(&mut self) -> crate::Result<bool> {
+        self.acquire(LockMode::Shared, false)
+    }
+
+    /// Takes the lock in the given mode, refreshing the cached state when the
+    /// outermost level is entered.
+    fn acquire(&mut self, mode: LockMode, blocking: bool) -> crate::Result<bool> {
+        if self.lock_depth > 0 {
+            // A shared lock is held by other readers as well, so the file lock
+            // cannot be turned into an exclusive one without dropping it first.
+            if mode == LockMode::Exclusive && self.lock_mode == LockMode::Shared {
+                return Err(JamError::LockUpgrade.into());
+            }
+        } else {
+            if !self.take_file_lock(mode, blocking)? {
+                return Ok(false);
             }
             if let Err(err) = self.refresh_state() {
                 let _ = self.lock_file.unlock();
                 return Err(err);
             }
+            self.lock_mode = mode;
         }
         self.lock_depth = self
             .lock_depth
@@ -374,12 +406,48 @@ impl JamMessageBase {
         Ok(true)
     }
 
-    /// Runs a closure with the message base locked.
+    fn take_file_lock(&self, mode: LockMode, blocking: bool) -> crate::Result<bool> {
+        if blocking {
+            match mode {
+                LockMode::Shared => self.lock_file.lock_shared()?,
+                LockMode::Exclusive => self.lock_file.lock()?,
+            }
+            return Ok(true);
+        }
+        let result = match mode {
+            LockMode::Shared => self.lock_file.try_lock_shared(),
+            LockMode::Exclusive => self.lock_file.try_lock(),
+        };
+        match result {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(err)) => Err(err.into()),
+        }
+    }
+
+    /// Runs a closure with the message base locked exclusively.
     pub fn transaction<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> crate::Result<T>,
     ) -> crate::Result<T> {
         self.lock()?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.unlock();
+        match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Runs a closure with the message base locked for reading.
+    ///
+    /// Writers are kept out for the duration, so a sequence of reads sees one
+    /// consistent generation of the base.
+    pub fn read_transaction<T>(
+        &mut self,
+        f: impl FnOnce(&Self) -> crate::Result<T>,
+    ) -> crate::Result<T> {
+        self.lock_shared()?;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.unlock();
         match result {
@@ -845,14 +913,21 @@ impl JamMessageBase {
     /// Record a user occupies in the .JLR file, deleted records are skipped.
     fn last_read_record(&self, user_crc: u32, user_id: u32) -> crate::Result<Option<u64>> {
         let data = self.read_last_read_records()?;
-        let mut needle = [0; 8];
-        needle[..4].copy_from_slice(&user_crc.to_le_bytes());
-        needle[4..].copy_from_slice(&user_id.to_le_bytes());
+        Ok(find_last_read_record(&data, user_crc, user_id).map(|record| record as u64))
+    }
 
-        Ok(data
-            .chunks_exact(LASTREAD_RECORD_SIZE)
-            .position(|record| record[..8] == needle && record[..8] != LASTREAD_DELETED)
-            .map(|record| record as u64))
+    /// Replaces the lastread file in one step, so an interrupted update cannot
+    /// leave a half written record behind.
+    pub(crate) fn store_last_read_records(&self, data: &[u8]) -> crate::Result<()> {
+        let path = self.file_name.with_extension(extensions::LASTREAD_INFO);
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".writing");
+        let tmp = PathBuf::from(tmp);
+        fs::write(&tmp, data)?;
+        pack::sync_file(&tmp)?;
+        fs::rename(&tmp, &path)?;
+        pack::sync_dir(&self.file_name);
+        Ok(())
     }
 
     /// Stores a lastread record, replacing the one the user already has.
@@ -862,19 +937,17 @@ impl JamMessageBase {
     /// yet gets one appended.
     pub fn write_last_read(&mut self, storage: &JamLastReadStorage) -> crate::Result<()> {
         self.transaction(|base| {
-            let path = base.file_name.with_extension(extensions::LASTREAD_INFO);
-            match base.last_read_record(storage.user_crc, storage.user_id)? {
-                Some(record) => {
-                    let mut file = OpenOptions::new().write(true).truncate(false).open(path)?;
-                    file.seek(SeekFrom::Start(record * LASTREAD_RECORD_SIZE as u64))?;
-                    storage.write(&mut file)?;
+            let mut data = base.read_last_read_records()?;
+            let mut record = Vec::with_capacity(LASTREAD_RECORD_SIZE);
+            storage.write(&mut record)?;
+            match find_last_read_record(&data, storage.user_crc, storage.user_id) {
+                Some(position) => {
+                    let start = position * LASTREAD_RECORD_SIZE;
+                    data[start..start + LASTREAD_RECORD_SIZE].copy_from_slice(&record);
                 }
-                None => {
-                    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-                    storage.write(&mut file)?;
-                }
+                None => data.extend_from_slice(&record),
             }
-            Ok(())
+            base.store_last_read_records(&data)
         })
     }
 
@@ -917,13 +990,13 @@ impl JamMessageBase {
     /// Marks the lastread record of a user deleted, as the format prescribes.
     pub fn delete_last_read(&mut self, user_crc: u32, user_id: u32) -> crate::Result<bool> {
         self.transaction(|base| {
-            let Some(record) = base.last_read_record(user_crc, user_id)? else {
+            let mut data = base.read_last_read_records()?;
+            let Some(position) = find_last_read_record(&data, user_crc, user_id) else {
                 return Ok(false);
             };
-            let path = base.file_name.with_extension(extensions::LASTREAD_INFO);
-            let mut file = OpenOptions::new().write(true).truncate(false).open(path)?;
-            file.seek(SeekFrom::Start(record * LASTREAD_RECORD_SIZE as u64))?;
-            file.write_all(&LASTREAD_DELETED)?;
+            let start = position * LASTREAD_RECORD_SIZE;
+            data[start..start + LASTREAD_DELETED.len()].copy_from_slice(&LASTREAD_DELETED);
+            base.store_last_read_records(&data)?;
             Ok(true)
         })
     }
@@ -1003,12 +1076,24 @@ impl Iterator for JamBaseMessageIter {
 }
 
 /// Length of a file, treating a missing file as empty.
-fn file_len(path: &Path) -> crate::Result<u64> {
+pub(crate) fn file_len(path: &Path) -> crate::Result<u64> {
     match fs::metadata(path) {
         Ok(meta) => Ok(meta.len()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(err) => Err(err.into()),
     }
+}
+
+/// Position of a user's lastread record, skipping the deleted ones.
+fn find_last_read_record(data: &[u8], user_crc: u32, user_id: u32) -> Option<usize> {
+    let mut needle = [0; 8];
+    needle[..4].copy_from_slice(&user_crc.to_le_bytes());
+    needle[4..].copy_from_slice(&user_id.to_le_bytes());
+    if needle == LASTREAD_DELETED {
+        return None;
+    }
+    data.chunks_exact(LASTREAD_RECORD_SIZE)
+        .position(|record| record[..8] == needle)
 }
 
 /// Undoes a partial append so a failed write does not leave a torn record behind.

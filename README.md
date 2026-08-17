@@ -46,7 +46,12 @@ println!("{}", base.read_message_text(&header)?);
 ```
 
 Use `base.messages()` to walk the current live messages in message-number
-order. Low-level operations that expose retired physical JHR records or mutate
+order. Readers that need a consistent snapshot should take `lock_shared()`
+(or `read_transaction`) so writers are kept out; writers still take the
+exclusive lock. `verify()` reports consistency problems without writing;
+`repair()` rebuilds the index and clamps last-read pointers when asked.
+
+Low-level operations that expose retired physical JHR records or mutate
 raw header data live under `jamjam::jam::raw`; they are intended for diagnostics,
 conversion and repair tools rather than normal message-base access.
 

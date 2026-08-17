@@ -12,6 +12,7 @@ Cargo.lock
 
 # Stable advisory lock sidecars created beside JAM message bases
 *.jamlock
+*.jlr.writing
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
