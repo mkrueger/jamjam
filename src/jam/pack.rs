@@ -9,12 +9,13 @@ use chrono::{DateTime, Utc};
 
 use crate::util::crc32::CRC_SEED;
 
-use super::{JAM_SIGNATURE, JamError, JamMessageBase, extensions, jhr_header::JHRHeaderInfo, msg_header::JamMessageHeader, msg_header::SubfieldType};
+use super::{
+    INDEX_RECORD_SIZE, JAM_SIGNATURE, JamError, JamMessageBase, extensions,
+    jhr_header::JhrHeaderInfo, msg_header::JamMessageHeader, msg_header::SubfieldType,
+};
 
 /// "If both ulongs are -1 (ffffffffH), there is no corresponding message header."
 pub(crate) const EMPTY_SLOT: u32 = 0xFFFF_FFFF;
-
-const INDEX_RECORD_SIZE: usize = 8;
 
 /// The criteria PCBPack was driven with, which is what the sysop is asked for
 /// when packing a conference from the board.
@@ -61,25 +62,25 @@ impl JamMessageBase {
         let now = Utc::now();
 
         let slots = self.read_index()?;
-        let header_path = self.path(extensions::HEADER_DATA);
-        let text_path = self.path(extensions::TEXT_DATA);
+        let header_path = self.file_path(extensions::HEADER_DATA);
+        let text_path = self.file_path(extensions::TEXT_DATA);
 
         let mut header_reader = BufReader::new(File::open(&header_path)?);
         let mut text_reader = BufReader::new(File::open(&text_path)?);
 
         let tmp_header_path = temp_path(&header_path);
         let tmp_text_path = temp_path(&text_path);
-        let tmp_index_path = temp_path(&self.path(extensions::MESSAGE_INDEX));
+        let tmp_index_path = temp_path(&self.file_path(extensions::MESSAGE_INDEX));
 
         let mut report = PackReport::default();
         let mut new_slots: Vec<Slot> = Vec::with_capacity(slots.len());
-        let mut header_offset = JHRHeaderInfo::JHR_HEADER_SIZE;
+        let mut header_offset = JhrHeaderInfo::JHR_HEADER_SIZE;
         let mut text_offset = 0u64;
 
         {
             let mut header_writer = BufWriter::new(File::create(&tmp_header_path)?);
             let mut text_writer = BufWriter::new(File::create(&tmp_text_path)?);
-            header_writer.write_all(&[0; JHRHeaderInfo::JHR_HEADER_SIZE as usize])?;
+            header_writer.write_all(&[0; JhrHeaderInfo::JHR_HEADER_SIZE as usize])?;
 
             for slot in &slots {
                 let Some((_, offset)) = slot else {
@@ -108,7 +109,10 @@ impl JamMessageBase {
                 let mut text = vec![0; header.txt_len as usize];
                 text_reader.seek(SeekFrom::Start(header.offset as u64))?;
                 if let Err(err) = text_reader.read_exact(&mut text) {
-                    log::error!("Message {} has no readable text, keeping the header: {err}", header.message_number);
+                    log::error!(
+                        "Message {} has no readable text, keeping the header: {err}",
+                        header.message_number
+                    );
                     text.clear();
                 }
 
@@ -121,7 +125,7 @@ impl JamMessageBase {
                     header.message_number = first + report.kept;
                 }
 
-                let crc = header.get_to().map_or(CRC_SEED, JamMessageBase::get_crc);
+                let crc = header.to().map_or(CRC_SEED, JamMessageBase::crc);
                 header.write(&mut header_writer)?;
                 new_slots.push(Some((crc, header_offset as u32)));
                 header_offset += header_size(&header) as u64;
@@ -140,15 +144,16 @@ impl JamMessageBase {
 
         fs::write(&tmp_index_path, index_bytes(&index))?;
         self.header_info.base_msg_num = base_msg_num;
-        self.header_info.active_msgs = (base_msg_num + index.len() as u32).saturating_sub(1);
+        self.header_info.active_msgs = report.kept;
+        self.index_records = index.len() as u32;
         write_base_header(&tmp_header_path, &mut self.header_info)?;
 
         fs::rename(&tmp_text_path, &text_path)?;
         fs::rename(&tmp_header_path, &header_path)?;
-        fs::rename(&tmp_index_path, self.path(extensions::MESSAGE_INDEX))?;
+        fs::rename(&tmp_index_path, self.file_path(extensions::MESSAGE_INDEX))?;
 
-        report.low_message_number = self.header_info.base_msg_num;
-        report.high_message_number = self.header_info.active_msgs;
+        report.low_message_number = self.lowest_message_number();
+        report.high_message_number = self.highest_message_number();
         Ok(report)
     }
 
@@ -157,16 +162,16 @@ impl JamMessageBase {
     ///
     /// Deleted messages keep their slot so they can still be recovered.
     pub fn reindex(&mut self) -> crate::Result<PackReport> {
-        let header_path = self.path(extensions::HEADER_DATA);
+        let header_path = self.file_path(extensions::HEADER_DATA);
         let file = File::open(&header_path)?;
         let size = file.metadata()?.len();
         let mut reader = BufReader::new(file);
-        reader.seek(SeekFrom::Start(JHRHeaderInfo::JHR_HEADER_SIZE))?;
+        reader.seek(SeekFrom::Start(JhrHeaderInfo::JHR_HEADER_SIZE))?;
 
         // A header that grew was appended instead of overwritten, so the last
         // copy of a message number is the current one.
-        let mut found: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
-        let mut offset = JHRHeaderInfo::JHR_HEADER_SIZE;
+        let mut found: BTreeMap<u32, (u32, u32, bool)> = BTreeMap::new();
+        let mut offset = JhrHeaderInfo::JHR_HEADER_SIZE;
         while offset < size {
             let header = match JamMessageHeader::read(&mut reader) {
                 Ok(header) => header,
@@ -176,24 +181,33 @@ impl JamMessageBase {
                 }
             };
             if header.message_number >= self.header_info.base_msg_num {
-                let crc = header.get_to().map_or(CRC_SEED, JamMessageBase::get_crc);
-                found.insert(header.message_number, (crc, offset as u32));
+                let crc = header.to().map_or(CRC_SEED, JamMessageBase::crc);
+                found.insert(
+                    header.message_number,
+                    (crc, offset as u32, header.is_deleted()),
+                );
             }
             offset += header_size(&header) as u64;
         }
 
         let base = self.header_info.base_msg_num;
-        let high = found.keys().next_back().copied().unwrap_or(base.saturating_sub(1));
+        let high = found
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(base.saturating_sub(1));
         let mut index: Vec<Slot> = vec![None; (high + 1 - base) as usize];
-        for (number, entry) in &found {
-            index[(number - base) as usize] = Some(*entry);
+        for (number, (crc, offset, _)) in &found {
+            index[(number - base) as usize] = Some((*crc, *offset));
         }
 
-        let tmp_index_path = temp_path(&self.path(extensions::MESSAGE_INDEX));
+        let tmp_index_path = temp_path(&self.file_path(extensions::MESSAGE_INDEX));
         fs::write(&tmp_index_path, index_bytes(&index))?;
-        fs::rename(&tmp_index_path, self.path(extensions::MESSAGE_INDEX))?;
+        fs::rename(&tmp_index_path, self.file_path(extensions::MESSAGE_INDEX))?;
 
-        self.header_info.active_msgs = high;
+        let active = found.values().filter(|(_, _, deleted)| !deleted).count() as u32;
+        self.header_info.active_msgs = active;
+        self.index_records = index.len() as u32;
         self.write_jhr_header()?;
 
         Ok(PackReport {
@@ -205,29 +219,38 @@ impl JamMessageBase {
         })
     }
 
-    fn path(&self, extension: &str) -> PathBuf {
+    fn file_path(&self, extension: &str) -> PathBuf {
         self.file_name.with_extension(extension)
     }
 
     /// The index as slots, `None` where the record marks that no header exists.
     fn read_index(&self) -> crate::Result<Vec<Slot>> {
-        let data = fs::read(self.path(extensions::MESSAGE_INDEX))?;
-        if data.len() % INDEX_RECORD_SIZE != 0 {
-            return Err(Box::new(JamError::IndexFileCorrupted));
+        let data = fs::read(self.file_path(extensions::MESSAGE_INDEX))?;
+        if !data.len().is_multiple_of(INDEX_RECORD_SIZE) {
+            return Err(JamError::IndexFileCorrupted.into());
         }
         Ok(data
             .chunks_exact(INDEX_RECORD_SIZE)
             .map(|record| {
-                let crc = u32::from_le_bytes(record[0..4].try_into().unwrap());
-                let offset = u32::from_le_bytes(record[4..8].try_into().unwrap());
-                if crc == EMPTY_SLOT && offset == EMPTY_SLOT { None } else { Some((crc, offset)) }
+                let crc = u32::from_le_bytes([record[0], record[1], record[2], record[3]]);
+                let offset = u32::from_le_bytes([record[4], record[5], record[6], record[7]]);
+                if crc == EMPTY_SLOT && offset == EMPTY_SLOT {
+                    None
+                } else {
+                    Some((crc, offset))
+                }
             })
             .collect())
     }
 }
 
 fn header_size(header: &JamMessageHeader) -> usize {
-    JamMessageHeader::FIXED_HEADER_SIZE + header.sub_fields.iter().map(|field| 8 + field.get_string().len()).sum::<usize>()
+    JamMessageHeader::FIXED_HEADER_SIZE
+        + header
+            .sub_fields
+            .iter()
+            .map(|field| 8 + field.content().len())
+            .sum::<usize>()
 }
 
 fn index_bytes(slots: &[Slot]) -> Vec<u8> {
@@ -247,8 +270,8 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 /// Writes the 1024 byte record the packed header file starts with.
-fn write_base_header(path: &Path, info: &mut JHRHeaderInfo) -> crate::Result<()> {
-    let mut file = OpenOptions::new().write(true).open(path)?;
+fn write_base_header(path: &Path, info: &mut JhrHeaderInfo) -> crate::Result<()> {
+    let mut file = OpenOptions::new().write(true).truncate(false).open(path)?;
     file.write_all(&JAM_SIGNATURE)?;
     file.write_all(&info.date_created.to_le_bytes())?;
     let mut writer = BufWriter::new(file);
@@ -275,13 +298,22 @@ fn should_remove(header: &JamMessageHeader, options: &PackOptions, now: DateTime
 }
 
 fn packout_date(header: &JamMessageHeader) -> Option<DateTime<Utc>> {
-    let field = header.sub_fields.iter().find(|field| *field.get_type() == SubfieldType::PackoutDate)?;
-    let text = String::from_utf8_lossy(field.get_string());
-    DateTime::parse_from_rfc3339(&text).ok().map(|date| date.with_timezone(&Utc))
+    let field = header
+        .sub_fields
+        .iter()
+        .find(|field| field.field_type() == SubfieldType::PackoutDate)?;
+    let text = String::from_utf8_lossy(field.content());
+    DateTime::parse_from_rfc3339(&text)
+        .ok()
+        .map(|date| date.with_timezone(&Utc))
 }
 
 fn message_date(header: &JamMessageHeader) -> Option<DateTime<Utc>> {
-    let seconds = if header.date_written != 0 { header.date_written } else { header.date_processed };
+    let seconds = if header.date_written != 0 {
+        header.date_written
+    } else {
+        header.date_processed
+    };
     if seconds == 0 {
         return None;
     }

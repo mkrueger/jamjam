@@ -1,45 +1,148 @@
 use crate::{
-    jam::{JamMessage, JamMessageBase},
-    qwk::qwk_message::QWKMessage,
-    util::echmoail::EchomailAddress,
+    jam::{self, JamMessage, JamMessageBase},
+    qwk::qwk_message::QwkMessage,
+    util::{cp437::to_utf8, echomail::EchomailAddress},
 };
+use std::collections::HashMap;
 
-pub fn convert_qwk_to_jam(qwk_mail: &[QWKMessage], jam_base: &mut JamMessageBase) -> crate::Result<()> {
-    for mail in qwk_mail {
-        let mut jam_msg = JamMessage::new(mail.msg_number, &EchomailAddress::default());
-
-        jam_msg = jam_msg
-            .with_from(mail.from.clone())
-            .with_to(mail.to.clone())
-            .with_subject(mail.subj.clone())
-            .with_date_time(mail.date_time().and_utc())
-            .with_is_deleted(mail.is_deleted());
-
-        jam_base.write_message(&jam_msg)?;
+fn jam_attributes(msg: &QwkMessage) -> u32 {
+    let mut result = 0;
+    // Private, read by someone else / by the recipient / comment to sysop.
+    if b"*+~`".contains(&msg.status) {
+        result |= jam::attributes::MSG_PRIVATE;
     }
-    jam_base.write_jhr_header()?;
+    if b"-+`^#".contains(&msg.status) {
+        result |= jam::attributes::MSG_READ;
+    }
+    if msg.is_deleted() {
+        result |= jam::attributes::MSG_DELETED;
+    }
+    result
+}
 
+/// Appends the given QWK messages to a JAM base.
+///
+/// The JAM base assigns the message numbers, so the reply pointers of the
+/// packet are translated to the numbers the messages end up with.
+pub fn convert_qwk_to_jam(
+    qwk_mail: &[QwkMessage],
+    jam_base: &mut JamMessageBase,
+) -> crate::Result<()> {
+    let aka = EchomailAddress::default();
+    let mut number_map = HashMap::new();
+    let mut written = Vec::with_capacity(qwk_mail.len());
+
+    for mail in qwk_mail {
+        let jam_msg = JamMessage::new(0, &aka)
+            .with_from(to_utf8(&mail.from).into())
+            .with_to(to_utf8(&mail.to).into())
+            .with_subject(to_utf8(&mail.subj).into())
+            .with_password(&mail.password)
+            .with_date_time(mail.date_time().and_utc())
+            .with_attributes(jam_attributes(mail))
+            .with_text(to_utf8(&mail.text).into());
+
+        let msgid_crc = jam_msg.msgid_crc();
+        let number = jam_base.write_message(&jam_msg)?;
+        number_map.insert(mail.msg_number, number);
+        written.push((number, msgid_crc, mail.ref_msg_number));
+    }
+
+    link_replies(jam_base, &written, &number_map)?;
+    jam_base.write_jhr_header()?;
     Ok(())
 }
-/*
+
+/// Second pass, a reply target is only known once every message has a number.
+fn link_replies(
+    jam_base: &JamMessageBase,
+    written: &[(u32, u32, u32)],
+    number_map: &HashMap<u32, u32>,
+) -> crate::Result<()> {
+    let crc_by_number: HashMap<u32, u32> = written
+        .iter()
+        .map(|(number, crc, _)| (*number, *crc))
+        .collect();
+    let mut first_reply: HashMap<u32, u32> = HashMap::new();
+
+    for (number, _, ref_number) in written {
+        let Some(reply_to) = number_map.get(ref_number) else {
+            continue;
+        };
+        if reply_to == number {
+            continue;
+        }
+        let Ok(mut header) = jam_base.read_header(*number) else {
+            continue;
+        };
+        header.reply_to = *reply_to;
+        if let Some(crc) = crc_by_number.get(reply_to) {
+            header.reply_crc = *crc;
+        }
+        jam_base.update_header(*number, &header)?;
+        first_reply.entry(*reply_to).or_insert(*number);
+    }
+
+    for (reply_to, first) in first_reply {
+        let Ok(mut header) = jam_base.read_header(reply_to) else {
+            continue;
+        };
+        if header.reply_first == 0 {
+            header.reply_first = first;
+            jam_base.update_header(reply_to, &header)?;
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
-    use crate::qwk::QwkMessageBase;
-
     use super::*;
+    use crate::qwk::QwkMessageBase;
+    use bstr::BString;
     use pretty_assertions::assert_eq;
-    use std::{path::PathBuf, time::SystemTime};
     use tempfile::TempDir;
 
-    #[test]
-    fn test_read_message_reader() {
-        let mut msg_base = QwkMessageBase::open("/home/mkrueger/Downloads/large", true).unwrap();
-        msg_base.index_offset_bug = true;
+    fn qwk_mail() -> Vec<QwkMessage> {
+        let msg_base = QwkMessageBase::open("data/qwk", true).unwrap();
+        msg_base
+            .iter()
+            .unwrap()
+            .collect::<crate::Result<_>>()
+            .unwrap()
+    }
 
-        let mail: Vec<QWKMessage> = msg_base.iter().flatten().collect();
-        convert_qwk_to_jam(&mail, &mut JamMessageBase::create(PathBuf::from("/home/mkrueger/Downloads/jam_base")).unwrap()).unwrap();
+    #[test]
+    fn test_conversion_keeps_the_message_text() {
+        let dir = TempDir::new().unwrap();
+        let mail = qwk_mail();
+        let mut jam = JamMessageBase::create(dir.path().join("converted")).unwrap();
+        convert_qwk_to_jam(&mail, &mut jam).unwrap();
+
+        assert_eq!(jam.active_messages(), mail.len() as u32);
+        for (i, msg) in mail.iter().enumerate() {
+            let header = jam.read_header(i as u32 + 1).unwrap();
+            assert_eq!(*header.from().unwrap(), BString::from(to_utf8(&msg.from)));
+            assert_eq!(*header.to().unwrap(), BString::from(to_utf8(&msg.to)));
+            assert_eq!(
+                *header.subject().unwrap(),
+                BString::from(to_utf8(&msg.subj))
+            );
+            assert_eq!(
+                jam.read_message_text(&header).unwrap(),
+                BString::from(to_utf8(&msg.text))
+            );
+        }
+    }
+
+    #[test]
+    fn test_conversion_numbers_messages_from_the_base() {
+        let dir = TempDir::new().unwrap();
+        let mail = qwk_mail();
+        let mut jam = JamMessageBase::create(dir.path().join("converted")).unwrap();
+        convert_qwk_to_jam(&mail, &mut jam).unwrap();
+
+        assert_eq!(jam.lowest_message_number(), 1);
+        assert_eq!(jam.highest_message_number(), mail.len() as u32);
     }
 }
-
-*/

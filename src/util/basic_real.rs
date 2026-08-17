@@ -17,17 +17,10 @@ impl From<[u8; 4]> for BasicReal {
 impl From<Vec<u8>> for BasicReal {
     fn from(value: Vec<u8>) -> Self {
         let mut data = [0u8; 4];
-        if value.len() >= 4 {
-            data[3] = value[3];
-        }
-        if value.len() >= 3 {
-            data[2] = value[2];
-        }
-        if value.len() >= 2 {
-            data[1] = value[1];
-        }
-        if value.len() >= 1 {
-            data[0] = value[0];
+        for (i, slot) in data.iter_mut().enumerate() {
+            if let Some(byte) = value.get(i) {
+                *slot = *byte;
+            }
         }
         Self { data }
     }
@@ -127,9 +120,13 @@ impl From<[u8; 8]> for BasicDouble {
 
 impl From<Vec<u8>> for BasicDouble {
     fn from(value: Vec<u8>) -> Self {
-        Self {
-            data: value.try_into().unwrap(),
+        let mut data = [0u8; 8];
+        for (i, slot) in data.iter_mut().enumerate() {
+            if let Some(byte) = value.get(i) {
+                *slot = *byte;
+            }
         }
+        Self { data }
     }
 }
 
@@ -185,7 +182,8 @@ impl From<BasicDouble> for i64 {
         }
         let is_negative = (value.data[6] & 0x80) != 0;
 
-        let value = ((u64::from_le_bytes(value.data) & 0x007FFFFF_FFFFFFFF) | 0x00800000_00000000) as i64;
+        let value =
+            ((u64::from_le_bytes(value.data) & 0x007FFFFF_FFFFFFFF) | 0x00800000_00000000) as i64;
 
         let exponent = exponent - 152;
         let result = if exponent < 0 {

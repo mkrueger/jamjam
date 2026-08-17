@@ -1,6 +1,6 @@
 use bstr::{BString, ByteSlice};
 
-use crate::{pcboard::PCB_TXT_EOL_PTR, qwk::QwkError};
+use crate::{Error, pcboard::PCB_TXT_EOL_PTR, qwk::QwkError};
 use std::io::{Read, Write};
 
 pub enum MessageType {
@@ -14,7 +14,7 @@ pub enum MessageType {
 }
 
 #[derive(Clone, Debug)]
-pub struct QWKMessage {
+pub struct QwkMessage {
     /// Message status flags
     /// # Remarks
     /// Not Read | Read | Type
@@ -79,7 +79,12 @@ pub struct QWKMessage {
 pub const MSG_ACTIVE: u8 = 225;
 pub const MSG_INACTIVE: u8 = 226;
 
-impl QWKMessage {
+/// Width of the fixed "To", "From" and "Subject" header fields.
+const FIELD_LEN: usize = 25;
+const PASSWORD_LEN: usize = 12;
+const DATE_TIME_LEN: usize = 13;
+
+impl QwkMessage {
     pub const HEADER_SIZE: usize = 128;
 
     /// Returns the date and time of the message
@@ -87,7 +92,8 @@ impl QWKMessage {
     /// # Remarks
     /// Returns default, in case of incorrect date
     pub fn date_time(&self) -> chrono::naive::NaiveDateTime {
-        chrono::NaiveDateTime::parse_from_str(&self.date_time.to_string(), "%m-%d-%y%H:%M").unwrap_or_default()
+        chrono::NaiveDateTime::parse_from_str(&self.date_time.to_string(), "%m-%d-%y%H:%M")
+            .unwrap_or_default()
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -120,8 +126,24 @@ impl QWKMessage {
         convert_u16!(logical_message_number, data);
         convert_u8!(net_tag, data);
 
-        let mut text = vec![0; 128 * ((num_blocks as usize).saturating_sub(1))];
-        file.read_exact(&mut text)?;
+        if num_blocks == 0 {
+            return Err(Error::qwk(
+                0,
+                "message header declares zero 128 byte blocks",
+            ));
+        }
+        let text_len = (num_blocks as usize - 1) * Self::HEADER_SIZE;
+        let mut text = Vec::new();
+        file.by_ref().take(text_len as u64).read_to_end(&mut text)?;
+        if text.len() != text_len {
+            return Err(Error::qwk(
+                0,
+                format!(
+                    "message text truncated, expected {text_len} bytes, got {}",
+                    text.len()
+                ),
+            ));
+        }
         let mut text: BString = crate::pcboard::convert_msg(&text);
         let mut to_field = to_field;
         let mut from_field = from_field;
@@ -133,14 +155,17 @@ impl QWKMessage {
                 if kludge == 0 {
                     break;
                 }
-                let line = text.lines().next().unwrap();
+                let Some(line) = text.lines().next() else {
+                    break;
+                };
+                let consumed = (line.len() + 1).min(text.len());
                 match kludge {
                     1 => to_field = line[4..].into(),   // "To: "
                     2 => from_field = line[6..].into(), // "From: "
                     3 => subj_field = line[9..].into(), // "Subject: "
                     _ => {}
                 }
-                text = text[line.len() + 1..].into();
+                text = text[consumed..].into();
             }
         }
 
@@ -161,36 +186,30 @@ impl QWKMessage {
         })
     }
 
+    /// Writes the 128 byte header followed by the message blocks.
+    ///
+    /// Fields wider than their fixed slot are truncated, the full value travels
+    /// in the kludge lines of the data block when `is_extended` is set.
     pub fn write(&self, mut file: impl Write, is_extended: bool) -> crate::Result<usize> {
-        let mut header: Vec<u8> = Vec::with_capacity(128);
-        header.push(self.status);
-        header.extend(format!("{:<7}", self.msg_number).as_bytes());
-        header.extend(self.date_time.to_vec());
-
-        let mut to_vec = self.to.to_vec();
-        to_vec.resize(25, b' ');
-        header.extend(&to_vec);
-
-        let mut from_vec = self.from.to_vec();
-        from_vec.resize(25, b' ');
-        header.extend(&from_vec);
-
-        let mut subj_vec = self.subj.to_vec();
-        subj_vec.resize(25, b' ');
-        header.extend(&subj_vec);
-
-        let mut password_vec = self.password.to_vec();
-        password_vec.resize(12, b' ');
-        header.extend(&password_vec);
-        header.extend(format!("{:<8}", self.ref_msg_number).as_bytes());
         let data = self.generate_data_block(is_extended);
-        let num_blocks = data.len() / 128 + 1;
-        header.extend(format!("{:<6}", num_blocks).as_bytes());
-        header.extend(&[self.active_flag]);
+        let num_blocks = data.len() / Self::HEADER_SIZE + 1;
+
+        let mut header: Vec<u8> = Vec::with_capacity(Self::HEADER_SIZE);
+        header.push(self.status);
+        header.extend(ascii_number(self.msg_number, 7)?);
+        header.extend(fixed_field(&self.date_time, DATE_TIME_LEN));
+        header.extend(fixed_field(&self.to, FIELD_LEN));
+        header.extend(fixed_field(&self.from, FIELD_LEN));
+        header.extend(fixed_field(&self.subj, FIELD_LEN));
+        header.extend(fixed_field(&self.password, PASSWORD_LEN));
+        header.extend(ascii_number(self.ref_msg_number, 8)?);
+        header.extend(ascii_number(num_blocks as u32, 6)?);
+        header.push(self.active_flag);
         header.extend(&self.conference_number.to_le_bytes());
         header.extend(&self.logical_message_number.to_le_bytes());
-        header.extend(&[self.net_tag]);
+        header.push(self.net_tag);
 
+        debug_assert_eq!(header.len(), Self::HEADER_SIZE);
         file.write_all(&header)?;
         file.write_all(&data)?;
         Ok(num_blocks)
@@ -200,24 +219,27 @@ impl QWKMessage {
         let mut res = Vec::new();
 
         if is_extended {
-            if self.to.len() > 25 {
+            if self.to.len() > FIELD_LEN {
                 res.extend(b"To: ");
                 res.extend_from_slice(&self.to);
                 res.extend(PCB_TXT_EOL_PTR);
             }
-            if self.from.len() > 25 {
+            if self.from.len() > FIELD_LEN {
                 res.extend(b"From: ");
                 res.extend_from_slice(&self.from);
                 res.extend(PCB_TXT_EOL_PTR);
             }
 
-            if self.subj.len() > 25 {
+            if self.subj.len() > FIELD_LEN {
                 res.extend(b"Subject: ");
                 res.extend_from_slice(&self.subj);
                 res.extend(PCB_TXT_EOL_PTR);
             }
             // According to the spec after the kludge a blank line should be put.
-            if self.to.len() > 25 || self.from.len() > 25 || self.subj.len() > 25 {
+            if self.to.len() > FIELD_LEN
+                || self.from.len() > FIELD_LEN
+                || self.subj.len() > FIELD_LEN
+            {
                 res.extend(PCB_TXT_EOL_PTR);
             }
         }
@@ -236,7 +258,7 @@ impl QWKMessage {
 }
 
 fn parse_qwk_number(data: &[u8]) -> crate::Result<u32> {
-    let mut number = 0;
+    let mut number: u32 = 0;
     for &b in data {
         if b == b' ' || b == 0 {
             break;
@@ -244,10 +266,33 @@ fn parse_qwk_number(data: &[u8]) -> crate::Result<u32> {
         if !b.is_ascii_digit() {
             return Err(QwkError::InvalidMessageNumber.into());
         }
-        number = number * 10 + (b - b'0') as u32;
+        number = number
+            .checked_mul(10)
+            .and_then(|n| n.checked_add((b - b'0') as u32))
+            .ok_or(QwkError::InvalidMessageNumber)?;
     }
 
     Ok(number)
+}
+
+/// Truncates or space pads a value to the width its header slot has.
+fn fixed_field(field: &BString, len: usize) -> Vec<u8> {
+    let mut data = field.to_vec();
+    data.truncate(len);
+    data.resize(len, b' ');
+    data
+}
+
+fn ascii_number(value: u32, len: usize) -> crate::Result<Vec<u8>> {
+    let mut data = value.to_string().into_bytes();
+    if data.len() > len {
+        return Err(Error::qwk(
+            0,
+            format!("{value} does not fit into {len} ascii digits"),
+        ));
+    }
+    data.resize(len, b' ');
+    Ok(data)
 }
 
 fn get_kludge(text: &BString) -> u8 {

@@ -1,9 +1,6 @@
-use std::{
-    fs::File,
-    io::{BufReader, Read, Write},
-};
+use std::io::{Read, Write};
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct JamLastReadStorage {
     pub user_crc: u32,      // CRC-32 of user name (lowercase)   (1)
     pub user_id: u32,       // Unique UserID
@@ -14,7 +11,7 @@ pub struct JamLastReadStorage {
 impl JamLastReadStorage {
     const LAST_READ_SIZE: usize = 16;
 
-    pub fn load(file: &mut BufReader<File>) -> crate::Result<Self> {
+    pub fn load<R: Read>(file: &mut R) -> crate::Result<Self> {
         let data = &mut [0; Self::LAST_READ_SIZE];
         file.read_exact(data)?;
         let mut data = &data[..];
@@ -30,7 +27,7 @@ impl JamLastReadStorage {
         })
     }
 
-    pub fn write(&self, file: &mut File) -> crate::Result<()> {
+    pub fn write<W: Write>(&self, file: &mut W) -> crate::Result<()> {
         let mut record = Vec::new();
         record.extend_from_slice(&self.user_crc.to_le_bytes());
         record.extend_from_slice(&self.user_id.to_le_bytes());

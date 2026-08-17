@@ -8,7 +8,7 @@ use crate::{
         JamMessage, JamMessageBase, attributes,
         pack::{PackOptions, PackReport},
     },
-    util::echmoail::EchomailAddress,
+    util::echomail::EchomailAddress,
 };
 
 /// Four messages, "one" to "four", all written in 1990.
@@ -28,9 +28,9 @@ fn base(dir: &TempDir) -> JamMessageBase {
 }
 
 fn texts(base: &JamMessageBase) -> Vec<String> {
-    (base.base_messagenumber()..=base.active_messages())
+    (base.lowest_message_number()..=base.highest_message_number())
         .filter_map(|no| base.read_header(no).ok())
-        .map(|header| base.read_msg_text(&header).unwrap().to_string())
+        .map(|header| base.read_message_text(&header).unwrap().to_string())
         .collect()
 }
 
@@ -71,7 +71,11 @@ fn test_pack_keeps_message_numbers() {
     let msg = JamMessage::new(5, &EchomailAddress::default()).with_text(BString::from("five"));
     assert_eq!(base.write_message(&msg).unwrap(), 5);
     assert_eq!(base.read_header(5).unwrap().message_number, 5);
-    assert_eq!(base.read_msg_text(&base.read_header(1).unwrap()).unwrap(), "one");
+    assert_eq!(
+        base.read_message_text(&base.read_header(1).unwrap())
+            .unwrap(),
+        "one"
+    );
 }
 
 #[test]
@@ -115,9 +119,14 @@ fn test_pack_renumbers_from_a_new_low_number() {
     })
     .unwrap();
 
-    assert_eq!(base.base_messagenumber(), 500);
-    assert_eq!(base.active_messages(), 503);
-    assert_eq!(base.read_msg_text(&base.read_header(500).unwrap()).unwrap(), "one");
+    assert_eq!(base.lowest_message_number(), 500);
+    assert_eq!(base.highest_message_number(), 503);
+    assert_eq!(base.active_messages(), 4);
+    assert_eq!(
+        base.read_message_text(&base.read_header(500).unwrap())
+            .unwrap(),
+        "one"
+    );
     assert_eq!(base.read_header(503).unwrap().message_number, 503);
 }
 
@@ -145,7 +154,8 @@ fn test_pack_purges_by_date() {
 fn test_pack_purges_received_private_messages() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir);
-    base.set_attributes(2, attributes::MSG_PRIVATE | attributes::MSG_READ, 0).unwrap();
+    base.set_attributes(2, attributes::MSG_PRIVATE | attributes::MSG_READ, 0)
+        .unwrap();
     // Unread private mail stays, it is still of use to the receiver.
     base.set_attributes(3, attributes::MSG_PRIVATE, 0).unwrap();
 
@@ -185,12 +195,24 @@ fn test_pack_purges_messages_whose_packout_date_arrived() {
 fn test_pack_shrinks_the_files() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir);
-    let before = std::fs::metadata(dir.path().join("packing.jhr")).unwrap().len();
+    let before = std::fs::metadata(dir.path().join("packing.jhr"))
+        .unwrap()
+        .len();
     base.delete_message(2).unwrap();
     base.pack(&PackOptions::default()).unwrap();
 
-    assert!(std::fs::metadata(dir.path().join("packing.jhr")).unwrap().len() < before);
-    assert_eq!(std::fs::metadata(dir.path().join("packing.jdt")).unwrap().len(), "onethreefour".len() as u64);
+    assert!(
+        std::fs::metadata(dir.path().join("packing.jhr"))
+            .unwrap()
+            .len()
+            < before
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path().join("packing.jdt"))
+            .unwrap()
+            .len(),
+        "onethreefour".len() as u64
+    );
 }
 
 #[test]
@@ -203,13 +225,21 @@ fn test_reindex_rebuilds_a_lost_index() {
     base.update_header(2, &header).unwrap();
     std::fs::write(dir.path().join("packing.jdx"), []).unwrap();
 
-    let report = base.pack(&PackOptions { index_only: true, ..Default::default() }).unwrap();
+    let report = base
+        .pack(&PackOptions {
+            index_only: true,
+            ..Default::default()
+        })
+        .unwrap();
 
     assert_eq!(report.kept, 4);
     assert_eq!(report.removed, 0);
     assert_eq!(base.active_messages(), 4);
     assert_eq!(texts(&base), vec!["one", "two", "three", "four"]);
-    assert_eq!(base.read_header(2).unwrap().get_subject().unwrap(), "a much longer subject than before");
+    assert_eq!(
+        base.read_header(2).unwrap().subject().unwrap(),
+        "a much longer subject than before"
+    );
 }
 
 /// Rebuilding the index must not throw away messages the sysop can still recover.
@@ -220,7 +250,11 @@ fn test_reindex_keeps_deleted_messages() {
     base.delete_message(2).unwrap();
     std::fs::write(dir.path().join("packing.jdx"), []).unwrap();
 
-    base.pack(&PackOptions { index_only: true, ..Default::default() }).unwrap();
+    base.pack(&PackOptions {
+        index_only: true,
+        ..Default::default()
+    })
+    .unwrap();
     base.restore_message(2).unwrap();
 
     assert_eq!(texts(&base), vec!["one", "two", "three", "four"]);

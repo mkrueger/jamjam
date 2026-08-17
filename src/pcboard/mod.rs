@@ -7,7 +7,7 @@ use std::{
 use bstr::BString;
 use thiserror::Error;
 
-use crate::util::basic_real::BasicReal;
+use crate::{Error, util::basic_real::BasicReal};
 
 use self::{
     base_header::PCBoardMessageBaseHeader,
@@ -17,7 +17,7 @@ use self::{
 
 mod base_header;
 pub mod message_header;
-mod message_index;
+pub mod message_index;
 
 #[cfg(test)]
 mod tests;
@@ -47,7 +47,7 @@ mod extensions {
 /// PCBoard strings contain trailing spaces that need to be removed.
 pub(crate) fn convert_pcboard_str(buf: &[u8]) -> BString {
     let mut str = BString::from(buf);
-    while str.ends_with(&[b' ']) {
+    while str.ends_with(b" ") {
         str.pop();
     }
     str
@@ -71,21 +71,42 @@ pub struct PCBoardMessage {
 }
 
 impl PCBoardMessage {
-    pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
+    pub fn read<R: Read>(file: &mut R) -> crate::Result<Self> {
         let header = PCBoardMessageHeader::read(file)?;
-        let mut buf = vec![0; 128 * ((header.num_blocks as usize).saturating_sub(1))];
-        file.read_exact(&mut buf)?;
+        let body_len =
+            PCBoardMessageHeader::HEADER_SIZE * (header.num_blocks as usize).saturating_sub(1);
+        let mut buf = Vec::new();
+        file.by_ref().take(body_len as u64).read_to_end(&mut buf)?;
+        if buf.len() != body_len {
+            return Err(Error::pcboard(
+                0,
+                format!(
+                    "message body truncated, expected {body_len} bytes, got {}",
+                    buf.len()
+                ),
+            ));
+        }
         let mut i = 0;
 
         let mut extended_header = Vec::new();
         while i < buf.len() {
-            if buf[i] == 0xFF && buf[i + 1] == 0x40 {
+            if buf[i] == 0xFF && buf.get(i + 1) == Some(&0x40) {
+                if i + PCBoardExtendedHeader::RECORD_SIZE > buf.len() {
+                    return Err(Error::pcboard(
+                        i as u64,
+                        "extended header runs past the end of the message",
+                    ));
+                }
                 extended_header.push(PCBoardExtendedHeader::deserialize(&buf[i..])?);
-                i += 0x48;
+                i += PCBoardExtendedHeader::RECORD_SIZE;
                 continue;
             }
             let text = convert_msg(&buf[i..]);
-            return Ok(PCBoardMessage { header, extended_header, text });
+            return Ok(PCBoardMessage {
+                header,
+                extended_header,
+                text,
+            });
         }
 
         Ok(PCBoardMessage {
@@ -95,7 +116,7 @@ impl PCBoardMessage {
         })
     }
 
-    pub fn get_status(&self) -> MessageStatus {
+    pub fn status(&self) -> MessageStatus {
         match self.header.status {
             b'*' | b'+' => MessageStatus::Private,
             b'~' | b'`' => MessageStatus::CommentToSysop,
@@ -197,11 +218,18 @@ impl PCBoardMessageBase {
 
     pub fn read_message(&self, num: u32) -> crate::Result<PCBoardMessage> {
         if num < self.lowest_message_number() || num > self.highest_message_number() {
-            return Err(PCBoardError::MessageNumberOutOfRange(num, self.lowest_message_number(), self.highest_message_number()).into());
+            return Err(PCBoardError::MessageNumberOutOfRange(
+                num,
+                self.lowest_message_number(),
+                self.highest_message_number(),
+            )
+            .into());
         }
         let idx_file_name = self.file_name.with_extension(extensions::INDEX);
         let mut reader = BufReader::new(File::open(idx_file_name)?);
-        reader.seek(std::io::SeekFrom::Start((num as u64 - 1) * PCBoardMessageIndex::HEADER_SIZE as u64))?;
+        reader.seek(std::io::SeekFrom::Start(
+            (num as u64 - 1) * PCBoardMessageIndex::HEADER_SIZE as u64,
+        ))?;
         let header = PCBoardMessageIndex::read(&mut reader)?;
         let mut file = BufReader::new(File::open(&self.file_name)?);
         file.seek(std::io::SeekFrom::Start(header.offset as u64))?;
@@ -221,8 +249,7 @@ impl PCBoardMessageBase {
                 break;
             }
             let r: u32 = BasicReal::from(num.to_le_bytes()).into();
-            let num = (r - 1) * 128;
-            res.push(num);
+            res.push(r.saturating_sub(1) * 128);
         }
 
         Ok(res)
@@ -241,16 +268,20 @@ impl PCBoardMessageBase {
         Ok(res)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = crate::Result<PCBoardMessage>> {
-        let idx_file_name = self.file_name.clone();
-        let mut f = File::open(idx_file_name).unwrap();
-        let size = f.metadata().unwrap().len();
+    /// Iterates the messages in the order they are stored in the message file.
+    pub fn iter(
+        &self,
+    ) -> crate::Result<impl Iterator<Item = crate::Result<PCBoardMessage>> + use<>> {
+        let mut f = File::open(&self.file_name)?;
+        let size = f.metadata()?.len();
 
-        f.seek(std::io::SeekFrom::Start(128)).unwrap();
-        PCBoardMessageIter {
+        f.seek(std::io::SeekFrom::Start(
+            PCBoardMessageHeader::HEADER_SIZE as u64,
+        ))?;
+        Ok(PCBoardMessageIter {
             reader: BufReader::new(f),
             size,
-        }
+        })
     }
 }
 
@@ -263,13 +294,10 @@ impl Iterator for PCBoardMessageIter {
     type Item = crate::Result<PCBoardMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(pos) = self.reader.stream_position() {
-            if pos >= self.size {
-                return None;
-            }
-            Some(PCBoardMessage::read(&mut self.reader))
-        } else {
-            None
+        match self.reader.stream_position() {
+            Ok(pos) if pos >= self.size => None,
+            Ok(_) => Some(PCBoardMessage::read(&mut self.reader)),
+            Err(err) => Some(Err(err.into())),
         }
     }
 }

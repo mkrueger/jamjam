@@ -1,7 +1,7 @@
 pub const CRC_SEED: u32 = 0xFFFF_FFFF;
 
 #[must_use]
-pub(crate) fn get_crc32(buf: &[u8]) -> u32 {
+pub(crate) fn checksum(buf: &[u8]) -> u32 {
     let mut result = CRC_SEED;
     let mut buf = buf;
     while buf.len() >= 16 {
@@ -35,7 +35,7 @@ fn update_slow(prev: u32, buf: &[u8]) -> u32 {
 }
 /*
 #[must_use]
-pub fn update_crc32(crc: u32, b: u8) -> u32 {
+pub fn update(crc: u32, b: u8) -> u32 {
     (crc >> 8) ^ CRC32_TABLE[0][(b ^ crc as u8) as usize]
 }*/
 

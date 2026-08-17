@@ -11,16 +11,16 @@ pub fn main() {
 
     let base = JamMessageBase::open(&args[1]).unwrap();
 
-    for header in base.iter().flatten() {
+    for header in base.iter().unwrap().flatten() {
         println!(
             "From:{:40}  Number:{}/{}",
-            header.get_from().unwrap(),
-            header.message_number - base.base_messagenumber() + 1,
-            base.active_messages()
+            header.from().unwrap(),
+            header.message_number - base.lowest_message_number() + 1,
+            base.highest_message_number()
         );
-        println!("From:{}", header.get_to().unwrap());
-        println!("Subj:{}", header.get_subject().unwrap());
+        println!("From:{}", header.to().unwrap());
+        println!("Subj:{}", header.subject().unwrap());
         println!("--------------------------------------------------");
-        println!("{}", base.read_msg_text(&header).unwrap());
+        println!("{}", base.read_message_text(&header).unwrap());
     }
 }

@@ -7,11 +7,11 @@ use std::{
 use bstr::BString;
 use thiserror::Error;
 
-use crate::util::basic_real::BasicReal;
+use crate::{Error, util::basic_real::BasicReal};
 
 use self::{
     control::{Conference, ControlDat},
-    qwk_message::QWKMessage,
+    qwk_message::QwkMessage,
 };
 
 pub mod control;
@@ -44,51 +44,51 @@ pub struct QwkMessageBase {
 }
 
 impl QwkMessageBase {
-    pub fn get_bbs_name(&self) -> &BString {
+    pub fn bbs_name(&self) -> &BString {
         &self.control_dat.bbs_name
     }
 
-    pub fn get_bbs_city_and_state(&self) -> &BString {
+    pub fn bbs_city_and_state(&self) -> &BString {
         &self.control_dat.bbs_city_and_state
     }
 
-    pub fn get_bbs_phone_number(&self) -> &BString {
+    pub fn bbs_phone_number(&self) -> &BString {
         &self.control_dat.bbs_phone_number
     }
 
-    pub fn get_bbs_sysop_name(&self) -> &BString {
+    pub fn bbs_sysop_name(&self) -> &BString {
         &self.control_dat.bbs_sysop_name
     }
 
-    pub fn get_bbs_id(&self) -> &BString {
+    pub fn bbs_id(&self) -> &BString {
         &self.control_dat.bbs_id
     }
 
-    pub fn get_creation_time(&self) -> &BString {
+    pub fn creation_time(&self) -> &BString {
         &self.control_dat.creation_time
     }
 
-    pub fn get_qmail_user_name(&self) -> &BString {
+    pub fn qmail_user_name(&self) -> &BString {
         &self.control_dat.qmail_user_name
     }
 
-    pub fn get_qmail_menu_name(&self) -> &BString {
+    pub fn qmail_menu_name(&self) -> &BString {
         &self.control_dat.qmail_menu_name
     }
 
-    pub fn get_message_count(&self) -> u32 {
+    pub fn message_count(&self) -> u32 {
         self.control_dat.message_count
     }
 
-    pub fn get_welcome_screen(&self) -> &BString {
+    pub fn welcome_screen(&self) -> &BString {
         &self.control_dat.welcome_screen
     }
 
-    pub fn get_news_screen(&self) -> &BString {
+    pub fn news_screen(&self) -> &BString {
         &self.control_dat.news_screen
     }
 
-    pub fn get_logoff_screen(&self) -> &BString {
+    pub fn logoff_screen(&self) -> &BString {
         &self.control_dat.logoff_screen
     }
 
@@ -106,7 +106,7 @@ impl QwkMessageBase {
         })
     }
 
-    pub fn get_conferences(&self) -> &[Conference] {
+    pub fn conferences(&self) -> &[Conference] {
         &self.control_dat.conferences
     }
 
@@ -115,16 +115,28 @@ impl QwkMessageBase {
         Self::convert_qwk_index(data.as_slice())
     }
 
-    pub fn convert_qwk_index(mut data: &[u8]) -> crate::Result<Vec<u32>> {
-        let mut res = Vec::with_capacity(data.len() / 5);
-        while !data.is_empty() {
-            convert_qwk_ndx!(conference, data);
-            res.push(BasicReal::from(conference.to_le_bytes()).into());
+    /// Turns a .NDX file into message record numbers.
+    ///
+    /// Each record is a four byte BASIC real followed by the conference number,
+    /// which is redundant with the file name and therefore skipped.
+    pub fn convert_qwk_index(data: &[u8]) -> crate::Result<Vec<u32>> {
+        const NDX_RECORD_SIZE: usize = 5;
+        if !data.len().is_multiple_of(NDX_RECORD_SIZE) {
+            return Err(Error::qwk(
+                0,
+                format!(
+                    "index size {} is not a multiple of {NDX_RECORD_SIZE}",
+                    data.len()
+                ),
+            ));
         }
-        Ok(res)
+        Ok(data
+            .chunks_exact(NDX_RECORD_SIZE)
+            .map(|record| BasicReal::from([record[0], record[1], record[2], record[3]]).into())
+            .collect())
     }
 
-    pub fn read_conference_mail(&self, conference: u16) -> crate::Result<Vec<QWKMessage>> {
+    pub fn read_conference_mail(&self, conference: u16) -> crate::Result<Vec<QwkMessage>> {
         let file_name = format!("{:03}.ndx", conference);
         let index = Self::read_qwk_index(self.path.join(file_name))?;
         let mut res = Vec::with_capacity(index.len());
@@ -132,51 +144,54 @@ impl QwkMessageBase {
         let msg_file_name = self.path.join("messages.dat");
         let mut reader = BufReader::new(File::open(msg_file_name)?);
         for block in index {
-            // First block is the header block, so we need to subtract 1
-            // Unfortunately not all index files require that.
-            let mut block = block - 1;
+            // The first block holds the packet header, so record 0 is the second
+            // block in the file. Not every writer got that right, hence the flag.
+            let block = if self.index_offset_bug {
+                block
+            } else {
+                block.checked_sub(1).ok_or_else(|| {
+                    Error::qwk(0, "index record points in front of the first message")
+                })?
+            };
 
-            // easier to remove that way - hopefully there is a way to detect that which I overlooked.
-            if self.index_offset_bug {
-                block += 1;
-            }
-
-            reader.seek(std::io::SeekFrom::Start(block as u64 * 128))?;
-            let mail = QWKMessage::read(&mut reader, self.is_extended)?;
+            reader.seek(std::io::SeekFrom::Start(
+                block as u64 * QwkMessage::HEADER_SIZE as u64,
+            ))?;
+            let mail = QwkMessage::read(&mut reader, self.is_extended)?;
             res.push(mail);
         }
 
         Ok(res)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = crate::Result<QWKMessage>> {
+    /// Iterates every message in `messages.dat`, skipping the packet header block.
+    pub fn iter(&self) -> crate::Result<impl Iterator<Item = crate::Result<QwkMessage>> + use<>> {
         let idx_file_name = self.path.join("messages.dat");
-        let mut f = File::open(idx_file_name).unwrap();
-        let size = f.metadata().unwrap().len();
-        f.seek(std::io::SeekFrom::Start(128)).unwrap();
-        QWKMessageIter {
+        let mut f = File::open(idx_file_name)?;
+        let size = f.metadata()?.len();
+        f.seek(std::io::SeekFrom::Start(QwkMessage::HEADER_SIZE as u64))?;
+        Ok(QwkMessageIter {
             reader: BufReader::new(f),
             size,
-        }
+            is_extended: self.is_extended,
+        })
     }
 }
 
-struct QWKMessageIter {
+struct QwkMessageIter {
     reader: BufReader<File>,
     size: u64,
+    is_extended: bool,
 }
 
-impl Iterator for QWKMessageIter {
-    type Item = crate::Result<QWKMessage>;
+impl Iterator for QwkMessageIter {
+    type Item = crate::Result<QwkMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(pos) = self.reader.stream_position() {
-            if pos >= self.size {
-                return None;
-            }
-            Some(QWKMessage::read(&mut self.reader, true))
-        } else {
-            None
+        match self.reader.stream_position() {
+            Ok(pos) if pos >= self.size => None,
+            Ok(_) => Some(QwkMessage::read(&mut self.reader, self.is_extended)),
+            Err(err) => Some(Err(err.into())),
         }
     }
 }

@@ -10,7 +10,12 @@ pub struct EchomailAddress {
 
 impl EchomailAddress {
     pub fn new(zone: u16, net: u16, node: u16, point: u16) -> Self {
-        EchomailAddress { zone, net, node, point }
+        EchomailAddress {
+            zone,
+            net,
+            node,
+            point,
+        }
     }
 
     pub fn parse(input: &str) -> Option<Self> {
@@ -29,7 +34,11 @@ impl EchomailAddress {
                         continue;
                     }
                     if c.is_ascii_digit() {
-                        if let Some(next) = result.zone.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
+                        if let Some(next) = result
+                            .zone
+                            .checked_mul(10)
+                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
+                        {
                             result.zone = next;
                         } else {
                             return None;
@@ -49,7 +58,11 @@ impl EchomailAddress {
                         continue;
                     }
                     if c.is_ascii_digit() {
-                        if let Some(next) = result.net.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
+                        if let Some(next) = result
+                            .net
+                            .checked_mul(10)
+                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
+                        {
                             result.net = next;
                         } else {
                             return None;
@@ -70,7 +83,11 @@ impl EchomailAddress {
                     }
 
                     if c.is_ascii_digit() {
-                        if let Some(next) = result.node.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
+                        if let Some(next) = result
+                            .node
+                            .checked_mul(10)
+                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
+                        {
                             result.node = next;
                         } else {
                             return None;
@@ -85,7 +102,11 @@ impl EchomailAddress {
                         return None;
                     }
                     if c.is_ascii_digit() {
-                        if let Some(next) = result.point.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
+                        if let Some(next) = result
+                            .point
+                            .checked_mul(10)
+                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
+                        {
                             result.point = next;
                         } else {
                             return None;

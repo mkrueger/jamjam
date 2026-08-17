@@ -44,25 +44,35 @@ fn test_read_message() {
 #[test]
 fn test_iter() {
     let base = PCBoardMessageBase::open("data/pcboard/test").unwrap();
-    for (i, msg) in base.iter().enumerate() {
+    for (i, msg) in base.iter().unwrap().enumerate() {
         let msg = msg.unwrap();
         match i {
             0 => {
-                assert_eq!(MessageStatus::SenderPassword, msg.get_status());
+                assert_eq!(MessageStatus::SenderPassword, msg.status());
                 assert_eq!("SECRET", msg.header.password);
             }
             1 => {
-                assert_eq!(MessageStatus::Public, msg.get_status());
+                assert_eq!(MessageStatus::Public, msg.status());
             }
             2 => {
-                assert_eq!(MessageStatus::GroupPasswordMessageToAll, msg.get_status());
+                assert_eq!(MessageStatus::GroupPasswordMessageToAll, msg.status());
                 assert_eq!("GROUPPW", msg.header.password);
             }
             3 => {
-                assert_eq!(MessageStatus::Public, msg.get_status());
+                assert_eq!(MessageStatus::Public, msg.status());
             }
             _ => panic!("Too many messages"),
         }
     }
-    assert_eq!(4, base.iter().count());
+    assert_eq!(4, base.iter().unwrap().count());
+}
+
+#[test]
+fn test_truncated_message_is_rejected() {
+    let data = std::fs::read("data/pcboard/test").unwrap();
+    // The first 128 byte block holds the message base header.
+    let full = PCBoardMessage::read(&mut &data[128..]).unwrap();
+    let total = 128 * full.header.num_blocks as usize;
+
+    assert!(PCBoardMessage::read(&mut &data[128..128 + total - 1]).is_err());
 }

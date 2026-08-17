@@ -1,18 +1,51 @@
 # jamjam
 
-This is a library to load & convert message bases. It started as a library for the JAM message base format. But it made sense to add pcboard message base loading & conversion code as well for my project.
+[![CI](https://github.com/mkrueger/jamjam/actions/workflows/ci.yml/badge.svg)](https://github.com/mkrueger/jamjam/actions/workflows/ci.yml)
+
+A library to read, write and convert BBS message bases. It started as a library for the JAM message base format, then grew PCBoard and QWK support because the same project needed them.
+
+## Formats
+
+| Format | Read | Write | Notes |
+| ------ | ---- | ----- | ----- |
+| JAM | yes | yes | Including packing, renumbering and index rebuilding |
+| PCBoard | yes | no | Reading and conversion only, the format is documented in `doc/` if you want to add writing |
+| QWK / QWKE | yes | yes | Messages and `CONTROL.DAT` |
 
 ## JAM
-
-JAM is a message base format.
 
 From Wikipedia:
 
 > The JAM Message Base Format was one of the most popular file formats of message bases on DOS-based BBSes in the 1990s. JAM stands for "Joaquim-Andrew-Mats" after the original authors of the API, Joaquim Homrighausen, Andrew Milner, Mats Birch, and Mats Wallin.[1] Joaquim was the author of FrontDoor, a DOS-based FidoNet-compatible mailer. Andrew was the author of RemoteAccess, a popular DOS-based Bulletin Board System. JAM was originally released in 1993 in C, however the most popular implementation was Mark May's "MK Source for Msg Access" written in Pascal which also saw its initial release in 1993.
 
-I need that as part of a pcboard rewrite (yes pcb has an own message base format but JAM is more common).
+### Message numbering
 
-## JAM copyright
+The format keeps two separate values and mixing them up is an easy mistake:
+
+- `active_messages()` is the number of messages that are not deleted.
+- `lowest_message_number()` / `highest_message_number()` bracket the numbers the index can address.
+
+A packed base can start at message 500 and a base with deleted messages has gaps, so message numbers are derived from the index rather than from the active count.
+
+```rust
+use jamjam::jam::{JamMessage, JamMessageBase};
+use jamjam::util::echomail::EchomailAddress;
+
+let mut base = JamMessageBase::create("mybase")?;
+let number = base.write_message(
+    &JamMessage::new(0, &EchomailAddress::default())
+        .with_from("sysop".into())
+        .with_to("all".into())
+        .with_subject("hello".into())
+        .with_text("world".into()),
+)?;
+
+let header = base.read_header(number)?;
+println!("{}", base.read_message_text(&header)?);
+# Ok::<(), jamjam::Error>(())
+```
+
+### JAM copyright
 
 jamjam is licensed under MIT-X11 or Apache 2.0 (your choice). JAM itself is from:
 
@@ -24,17 +57,19 @@ Note that jamjam doesn't contain any 3rd party source code but took some source 
 
 ## PCBoard
 
-This message format is only used inside PCBoard - an old bulettin board system. This format is the base of the more well known QWK standard. The QWK format inherits some funny things from that - for example the 'password' field which is only used by PCBoad AFAIK.
+This message format is only used inside PCBoard - an old bulletin board system. This format is the base of the more well known QWK standard. The QWK format inherits some funny things from that - for example the 'password' field which is only used by PCBoard AFAIK.
 
-It's only the goal to read/understand the PCBoard format for convert it to something else. I don't bother/mind writing update routines for that. However the format is documented and feel free to add it :).
+The goal is to read and understand the PCBoard format in order to convert it to something else. Writing is not implemented, but the format is documented and contributions are welcome.
 
 ## QWK
 
-Started to add some QWK support. ATM I'm not at the point where I need the export. But need importing large message bases for testing purposes.
-Reading QWK basese work. However the *.ndx files seem to be pretty useless. There is a +-1 error in current QKW implementations.
+Reading and writing QWK bases works, including the QWKE extensions that carry over-long `To`, `From` and `Subject` values in kludge lines.
 
-However JamJam does the correct thing when reading (and will do when writing). The program that defines QWK is PCBOARD :). PCBoard doesn't count the first record in messages.dat so 0 means it's the 2nd record in the file.
-Which completely makes sense.
+The `*.ndx` files are close to useless in practice: there is an off-by-one error in current QWK implementations. jamjam does the correct thing, because the program that defines QWK is PCBoard, and PCBoard doesn't count the first record in `messages.dat`, so 0 means the second record in the file. Set `index_offset_bug` on the message base to read packets written by implementations that got this wrong.
+
+## Errors
+
+Every fallible call returns `jamjam::Result<T>`, which carries a `jamjam::Error`. It distinguishes I/O failures from format specific problems, so a corrupt or truncated message base is reported rather than silently treated as end of file.
 
 ## Example
 

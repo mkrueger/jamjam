@@ -12,8 +12,8 @@ use crate::jam::{JAM_SIGNATURE, JamError};
 ///
 /// The first actual message header starts at offset 1024 in the .JHR file.
 #[derive(Debug, Default)]
-pub struct JHRHeaderInfo {
-    /// <J><A><M> followed by <NUL>
+pub struct JhrHeaderInfo {
+    /// `<J><A><M>` followed by `<NUL>`
     //pub signature: u32,
 
     /// Creation date
@@ -44,7 +44,7 @@ pub struct JHRHeaderInfo {
     // pub reserved: [u8; 1000]
 }
 
-impl JHRHeaderInfo {
+impl JhrHeaderInfo {
     const JHR_USED_HEADER_SIZE: usize = 24;
     pub const JHR_HEADER_SIZE: u64 = 1024;
 
@@ -52,7 +52,7 @@ impl JHRHeaderInfo {
         let data = &mut [0; Self::JHR_USED_HEADER_SIZE];
         file.read_exact(data)?;
         if !data.starts_with(&JAM_SIGNATURE) {
-            return Err(Box::new(JamError::InvalidHeaderSignature));
+            return Err(JamError::InvalidHeaderSignature.into());
         }
         let mut data = &data[4..];
         convert_u32!(datecreated, data);

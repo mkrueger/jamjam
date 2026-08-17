@@ -7,15 +7,17 @@ use std::{fs::File, io::Read};
 
 use bstr::BString;
 use chrono::{DateTime, Utc};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::slice::ParallelSlice;
 use thiserror::Error;
 
 use crate::util::crc32::{self, CRC_SEED};
-use crate::util::echmoail::EchomailAddress;
+use crate::util::echomail::EchomailAddress;
 
-use self::jhr_header::JHRHeaderInfo;
+use self::jhr_header::JhrHeaderInfo;
 use self::last_read_storage::JamLastReadStorage;
 use self::msg_header::{JamMessageHeader, MessageSubfield, SubfieldType};
+use self::pack::EMPTY_SLOT;
 
 pub mod jhr_header;
 pub mod last_read_storage;
@@ -68,9 +70,17 @@ mod extensions {
 
 const JAM_SIGNATURE: [u8; 4] = [b'J', b'A', b'M', 0];
 
+/// Two ulongs: CRC-32 of the recipient and the header offset in the .JHR file.
+pub(crate) const INDEX_RECORD_SIZE: usize = 8;
+
+/// Below this many index records a plain scan beats spawning rayon tasks.
+const PARALLEL_SEARCH_THRESHOLD: usize = 8192;
+
 pub struct JamMessageBase {
     file_name: PathBuf,
-    header_info: JHRHeaderInfo,
+    header_info: JhrHeaderInfo,
+    /// Number of records in the .JDX file, including the slots of deleted messages.
+    index_records: u32,
     last_read_record: i32,
     locked: AtomicBool,
 }
@@ -78,29 +88,41 @@ pub struct JamMessageBase {
 impl JamMessageBase {
     /// opens an existing message base with base path (without any extension)
     pub fn open<P: AsRef<Path>>(file_name: P) -> crate::Result<Self> {
-        let header_file_name = file_name.as_ref().with_extension(extensions::HEADER_DATA);
-        match File::open(header_file_name) {
-            Ok(mut file) => {
-                let header_info = JHRHeaderInfo::load(&mut file)?;
-                Ok(Self {
-                    file_name: file_name.as_ref().into(),
-                    header_info,
-                    last_read_record: -1,
-                    locked: AtomicBool::new(false),
-                })
-            }
-            Err(err) => {
-                log::error!("Error opening message base: {} from {}", err, file_name.as_ref().display());
-                return Err(err.into());
-            }
-        }
+        let file_name = file_name.as_ref();
+        let header_file_name = file_name.with_extension(extensions::HEADER_DATA);
+        let mut file = File::open(&header_file_name).inspect_err(|err| {
+            log::error!("Error opening message base {}: {err}", file_name.display());
+        })?;
+        let header_info = JhrHeaderInfo::load(&mut file)?;
+        let mut base = Self {
+            file_name: file_name.into(),
+            header_info,
+            index_records: 0,
+            last_read_record: -1,
+            locked: AtomicBool::new(false),
+        };
+        base.index_records = base.count_index_records()?;
+        Ok(base)
     }
 
-    pub fn get_filename(&self) -> &Path {
+    fn count_index_records(&self) -> crate::Result<u32> {
+        let path = self.file_name.with_extension(extensions::MESSAGE_INDEX);
+        let len = match fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err.into()),
+        };
+        if !len.is_multiple_of(INDEX_RECORD_SIZE as u64) {
+            return Err(JamError::IndexFileCorrupted.into());
+        }
+        Ok((len / INDEX_RECORD_SIZE as u64) as u32)
+    }
+
+    pub fn path(&self) -> &Path {
         &self.file_name
     }
 
-    pub fn get_info(&self) -> &JHRHeaderInfo {
+    pub fn info(&self) -> &JhrHeaderInfo {
         &self.header_info
     }
 
@@ -109,7 +131,7 @@ impl JamMessageBase {
         self.header_info.mod_counter
     }
 
-    /// Lowest message number in index file
+    /// Lowest message number in index file (`BaseMsgNum`).
     ///
     /// # Remarks
     /// This field determines the lowest message number in the index file.
@@ -122,11 +144,27 @@ impl JamMessageBase {
     /// calculates the next available message number (for creating new
     /// messages) as well as the highest and lowest message number in a
     /// message area.
-    pub fn base_messagenumber(&self) -> u32 {
+    pub fn lowest_message_number(&self) -> u32 {
         self.header_info.base_msg_num
     }
 
-    /// Number of active (not deleted) msgs  
+    /// Highest message number the index can address.
+    ///
+    /// Returns `lowest_message_number() - 1` for an empty base, so that
+    /// `lowest..=highest` is an empty range.
+    pub fn highest_message_number(&self) -> u32 {
+        self.header_info
+            .base_msg_num
+            .saturating_add(self.index_records)
+            .saturating_sub(1)
+    }
+
+    /// Number of records in the index, deleted messages included.
+    pub fn index_records(&self) -> u32 {
+        self.index_records
+    }
+
+    /// Number of active (not deleted) msgs
     pub fn active_messages(&self) -> u32 {
         self.header_info.active_msgs
     }
@@ -138,26 +176,42 @@ impl JamMessageBase {
 
     /// Checks if a password is valid.
     pub fn is_password_valid(&self, password: &BString) -> bool {
-        self.header_info.password_crc == CRC_SEED || self.header_info.password_crc == Self::get_crc(password)
+        self.header_info.password_crc == CRC_SEED
+            || self.header_info.password_crc == Self::crc(password)
     }
 
     pub fn create<P: AsRef<Path>>(file_name: P) -> crate::Result<Self> {
-        Self::create_with_passwordcrc(file_name, CRC_SEED)
+        Self::create_with_password_crc(file_name, CRC_SEED)
     }
 
-    pub fn create_with_password<P: AsRef<Path>>(file_name: P, password: &BString) -> crate::Result<Self> {
-        Self::create_with_passwordcrc(file_name, Self::get_crc(password))
+    pub fn create_with_password<P: AsRef<Path>>(
+        file_name: P,
+        password: &BString,
+    ) -> crate::Result<Self> {
+        Self::create_with_password_crc(file_name, Self::crc(password))
     }
 
-    pub fn create_with_passwordcrc<P: AsRef<Path>>(file_name: P, passwordcrc: u32) -> crate::Result<Self> {
+    pub fn create_with_password_crc<P: AsRef<Path>>(
+        file_name: P,
+        passwordcrc: u32,
+    ) -> crate::Result<Self> {
         let header_file_name = file_name.as_ref().with_extension(extensions::HEADER_DATA);
-        if let Err(err) = JHRHeaderInfo::create(&header_file_name, passwordcrc) {
-            log::error!("Error creating message base: {}", header_file_name.display());
-            return Err(err.into());
+        if let Err(err) = JhrHeaderInfo::create(&header_file_name, passwordcrc) {
+            log::error!(
+                "Error creating message base: {}",
+                header_file_name.display()
+            );
+            return Err(err);
         }
         fs::write(file_name.as_ref().with_extension(extensions::TEXT_DATA), "")?;
-        fs::write(file_name.as_ref().with_extension(extensions::MESSAGE_INDEX), "")?;
-        fs::write(file_name.as_ref().with_extension(extensions::LASTREAD_INFO), "")?;
+        fs::write(
+            file_name.as_ref().with_extension(extensions::MESSAGE_INDEX),
+            "",
+        )?;
+        fs::write(
+            file_name.as_ref().with_extension(extensions::LASTREAD_INFO),
+            "",
+        )?;
         Self::open(file_name)
     }
 
@@ -181,50 +235,114 @@ impl JamMessageBase {
 
     /// Unlocks the message base
     pub fn unlock(&self) {
-        self.locked.store(false, std::sync::atomic::Ordering::Release);
+        self.locked
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Locks the message base until the returned guard is dropped.
+    pub fn lock_guard(&self) -> JamLockGuard<'_> {
+        self.lock();
+        JamLockGuard { base: self }
     }
 
     /// Get the jam base crc of a string
     ///
     /// This is the lowercase z-modem crc32
-    pub fn get_crc(str: &BString) -> u32 {
+    pub fn crc(str: &BString) -> u32 {
         let mut str = str.clone();
         str.make_ascii_lowercase();
-        let crc = crc32::get_crc32(&str);
+        let crc = crc32::checksum(&str);
         crc ^ CRC_SEED
     }
 
+    /// Appends a message and updates the index and the base header.
+    ///
+    /// The message number is derived from the index, so a base that was packed
+    /// or renumbered continues where its index left off. On failure the three
+    /// files are truncated back to the length they had before.
     pub fn write_message(&mut self, message: &JamMessage) -> crate::Result<u32> {
-        let mut header = message.create_jam_header();
-        let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
-        let mut text_file = OpenOptions::new().create(true).append(true).open(text_file_name)?;
-
-        self.header_info.active_msgs += 1;
-        header.message_number = self.header_info.active_msgs;
-        header.offset = text_file.metadata()?.len() as u32;
-        header.txt_len = message.get_text().len() as u32;
-        text_file.write_all(message.get_text())?;
-
+        let text_path = self.file_name.with_extension(extensions::TEXT_DATA);
         let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
-        let header_file = OpenOptions::new().create(true).append(true).open(header_path)?;
-        let message_header_offset = header_file.metadata()?.len() as u32;
+        let index_path = self.file_name.with_extension(extensions::MESSAGE_INDEX);
 
+        let text_len = file_len(&text_path)?;
+        let header_len = file_len(&header_path)?;
+        let index_len = file_len(&index_path)?;
+
+        let msg_number = self.highest_message_number().saturating_add(1);
+        match Self::append_message(
+            message,
+            msg_number,
+            &text_path,
+            &header_path,
+            &index_path,
+            text_len,
+            header_len,
+        ) {
+            Ok(()) => {
+                self.index_records += 1;
+                if !message.is_deleted() {
+                    self.header_info.active_msgs += 1;
+                }
+                self.write_jhr_header()?;
+                Ok(msg_number)
+            }
+            Err(err) => {
+                rollback(&text_path, text_len);
+                rollback(&header_path, header_len);
+                rollback(&index_path, index_len);
+                Err(err)
+            }
+        }
+    }
+
+    fn append_message(
+        message: &JamMessage,
+        msg_number: u32,
+        text_path: &Path,
+        header_path: &Path,
+        index_path: &Path,
+        text_offset: u64,
+        header_offset: u64,
+    ) -> crate::Result<()> {
+        let mut header = message.create_jam_header();
+        header.message_number = msg_number;
+        header.offset = text_offset as u32;
+        header.txt_len = message.text().len() as u32;
+
+        let mut text_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(text_path)?;
+        text_file.write_all(message.text())?;
+        text_file.flush()?;
+
+        let header_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(header_path)?;
         let mut writer = BufWriter::new(header_file);
         header.write(&mut writer)?;
         writer.flush()?;
 
-        let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
-        let mut index_file = OpenOptions::new().create(true).append(true).open(index_file_name)?;
-        let crc = if let Some(to) = header.get_to() { Self::get_crc(to) } else { CRC_SEED };
+        let mut index_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(index_path)?;
+        let crc = header.to().map_or(CRC_SEED, Self::crc);
         index_file.write_all(&crc.to_le_bytes())?;
-        index_file.write_all(&message_header_offset.to_le_bytes())?;
-        Ok(header.message_number)
+        index_file.write_all(&(header_offset as u32).to_le_bytes())?;
+        index_file.flush()?;
+        Ok(())
     }
 
     /// Writes the current header to disk.
     pub fn write_jhr_header(&mut self) -> crate::Result<()> {
         let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
-        let header_file = OpenOptions::new().create(true).write(true).open(header_path)?;
+        let header_file = OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(header_path)?;
         let mut writer = BufWriter::new(header_file);
         self.header_info.update(&mut writer)?;
         writer.flush()?;
@@ -236,11 +354,12 @@ impl JamMessageBase {
     pub fn read_jhr_header(&mut self) -> crate::Result<()> {
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let mut header = File::open(header_file_name)?;
-        self.header_info = JHRHeaderInfo::load(&mut header)?;
+        self.header_info = JhrHeaderInfo::load(&mut header)?;
+        self.index_records = self.count_index_records()?;
         Ok(())
     }
 
-    pub fn read_msg_text(&self, header: &JamMessageHeader) -> crate::Result<BString> {
+    pub fn read_message_text(&self, header: &JamMessageHeader) -> crate::Result<BString> {
         let text_file_name = self.file_name.with_extension(extensions::TEXT_DATA);
         let mut text_file = File::open(text_file_name)?;
         text_file.seek(SeekFrom::Start(header.offset as u64))?;
@@ -253,7 +372,7 @@ impl JamMessageBase {
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let header_file = File::open(header_file_name)?;
         let mut reader = BufReader::new(header_file);
-        reader.seek(SeekFrom::Start(JHRHeaderInfo::JHR_HEADER_SIZE))?;
+        reader.seek(SeekFrom::Start(JhrHeaderInfo::JHR_HEADER_SIZE))?;
         let mut res = Vec::new();
         while let Ok(header) = JamMessageHeader::read(&mut reader) {
             res.push(header);
@@ -262,29 +381,11 @@ impl JamMessageBase {
     }
 
     pub fn read_header(&self, msg_number: u32) -> crate::Result<JamMessageHeader> {
-        if msg_number < self.header_info.base_msg_num || msg_number > self.header_info.active_msgs {
-            return Err(JamError::MessageNumberOutOfRange(msg_number, self.header_info.base_msg_num, self.header_info.active_msgs).into());
-        }
-        let record = (msg_number - self.header_info.base_msg_num) as u64;
-
-        let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
-        let mut index_file = OpenOptions::new().read(true).open(index_file_name)?;
-        if let Err(_err) = index_file.seek(SeekFrom::Start(record * 8 + 4)) {
-            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
-        }
-        let mut offset = [0; 4];
-        if let Err(err) = index_file.read_exact(&mut offset) {
-            log::error!("Error reading index file: {}", err);
-            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
-        }
-        let offset = u32::from_le_bytes(offset);
-        if offset == pack::EMPTY_SLOT {
-            return Err(JamError::MessageDeleted.into());
-        }
+        let offset = self.header_offset(msg_number)?;
 
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let mut header_file = File::open(header_file_name)?;
-        header_file.seek(SeekFrom::Start(offset as u64))?;
+        header_file.seek(SeekFrom::Start(offset))?;
         let mut reader = BufReader::new(header_file);
         let header = JamMessageHeader::read(&mut reader)?;
 
@@ -294,21 +395,35 @@ impl JamMessageBase {
         Ok(header)
     }
 
+    /// Index record a message number maps to.
+    fn index_record(&self, msg_number: u32) -> crate::Result<u64> {
+        let low = self.lowest_message_number();
+        let high = self.highest_message_number();
+        if self.index_records == 0 || msg_number < low || msg_number > high {
+            return Err(JamError::MessageNumberOutOfRange(msg_number, low, high).into());
+        }
+        Ok((msg_number - low) as u64)
+    }
+
     /// Byte offset of a message header inside the .JHR file.
     fn header_offset(&self, msg_number: u32) -> crate::Result<u64> {
-        if msg_number < self.header_info.base_msg_num || msg_number > self.header_info.active_msgs {
-            return Err(JamError::MessageNumberOutOfRange(msg_number, self.header_info.base_msg_num, self.header_info.active_msgs).into());
-        }
-        let record = (msg_number - self.header_info.base_msg_num) as u64;
+        let record = self.index_record(msg_number)?;
         let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
-        let mut index_file = OpenOptions::new().read(true).open(index_file_name)?;
-        if index_file.seek(SeekFrom::Start(record * 8 + 4)).is_err() {
-            return Err(JamError::IndexFileCorrupt(record, index_file.metadata()?.len()).into());
+        let mut index_file = File::open(index_file_name)?;
+        let len = index_file.metadata()?.len();
+        if index_file
+            .seek(SeekFrom::Start(record * INDEX_RECORD_SIZE as u64 + 4))
+            .is_err()
+        {
+            return Err(JamError::IndexFileCorrupt(record, len).into());
         }
         let mut offset = [0; 4];
-        index_file.read_exact(&mut offset)?;
+        if let Err(err) = index_file.read_exact(&mut offset) {
+            log::error!("Error reading index file: {err}");
+            return Err(JamError::IndexFileCorrupt(record, len).into());
+        }
         let offset = u32::from_le_bytes(offset);
-        if offset == pack::EMPTY_SLOT {
+        if offset == EMPTY_SLOT {
             return Err(JamError::MessageDeleted.into());
         }
         Ok(offset as u64)
@@ -316,7 +431,9 @@ impl JamMessageBase {
 
     /// Turns attribute bits on and off without touching the rest of the header.
     /// Unlike `read_header` this also reaches deleted messages.
-    pub fn set_attributes(&self, msg_number: u32, set: u32, clear: u32) -> crate::Result<()> {
+    ///
+    /// Returns whether the attributes actually changed.
+    pub fn set_attributes(&self, msg_number: u32, set: u32, clear: u32) -> crate::Result<bool> {
         let offset = self.header_offset(msg_number)?;
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
         let mut header_file = File::open(&header_file_name)?;
@@ -326,25 +443,31 @@ impl JamMessageBase {
 
         let attributes = (header.attributes | set) & !clear;
         if attributes == header.attributes {
-            return Ok(());
+            return Ok(false);
         }
         header.attributes = attributes;
 
-        let mut header_file = OpenOptions::new().write(true).open(header_file_name)?;
+        let mut header_file = OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(header_file_name)?;
         header_file.seek(SeekFrom::Start(offset))?;
         let mut writer = BufWriter::new(header_file);
         header.write(&mut writer)?;
         writer.flush()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Replaces a message header. The subfields can change length, so the new
     /// record goes to the end of the header file and the index is pointed at it.
-    /// The old record stays behind until the base is packed.
+    ///
+    /// As the format requires, the old record is marked deleted and its text
+    /// length is zeroed so that packing does not reclaim the text that now
+    /// belongs to the new record.
     pub fn update_header(&self, msg_number: u32, header: &JamMessageHeader) -> crate::Result<()> {
-        if msg_number < self.header_info.base_msg_num || msg_number > self.header_info.active_msgs {
-            return Err(JamError::MessageNumberOutOfRange(msg_number, self.header_info.base_msg_num, self.header_info.active_msgs).into());
-        }
+        let old_offset = self.header_offset(msg_number)?;
+        let record = self.index_record(msg_number)?;
+
         let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
         let header_file = OpenOptions::new().append(true).open(&header_path)?;
         let offset = header_file.metadata()?.len() as u32;
@@ -352,28 +475,62 @@ impl JamMessageBase {
         header.write(&mut writer)?;
         writer.flush()?;
 
-        let record = (msg_number - self.header_info.base_msg_num) as u64;
         let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
-        let mut index_file = OpenOptions::new().write(true).open(index_file_name)?;
-        index_file.seek(SeekFrom::Start(record * 8))?;
-        let crc = if let Some(to) = header.get_to() { Self::get_crc(to) } else { CRC_SEED };
+        let mut index_file = OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(index_file_name)?;
+        index_file.seek(SeekFrom::Start(record * INDEX_RECORD_SIZE as u64))?;
+        let crc = header.to().map_or(CRC_SEED, Self::crc);
         index_file.write_all(&crc.to_le_bytes())?;
         index_file.write_all(&offset.to_le_bytes())?;
+
+        self.retire_header(old_offset)?;
         Ok(())
     }
 
-    /// Sets the delete flag of a given message header
-    /// `read_header` will never return a deleted message. But it's still there and can be recovered.
+    /// Marks a superseded header record as deleted and drops its text length so
+    /// that packing leaves the text of the replacing record alone.
+    fn retire_header(&self, offset: u64) -> crate::Result<()> {
+        let header_path = self.file_name.with_extension(extensions::HEADER_DATA);
+        let mut file = File::open(&header_path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut reader = BufReader::new(file);
+        let mut old = JamMessageHeader::read(&mut reader)?;
+        old.set_deleted(true);
+        old.txt_len = 0;
 
-    /// The message will be deleted when the message base gets packed.
-    pub fn delete_message(&self, msg_number: u32) -> crate::Result<()> {
-        self.set_attributes(msg_number, attributes::MSG_DELETED, 0)
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(&header_path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut writer = BufWriter::new(file);
+        old.write(&mut writer)?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Sets the delete flag of a given message header.
+    ///
+    /// `read_header` will never return a deleted message, but it is still there
+    /// and can be recovered until the message base gets packed.
+    pub fn delete_message(&mut self, msg_number: u32) -> crate::Result<()> {
+        if self.set_attributes(msg_number, attributes::MSG_DELETED, 0)? {
+            self.header_info.active_msgs = self.header_info.active_msgs.saturating_sub(1);
+            self.write_jhr_header()?;
+        }
+        Ok(())
     }
 
     /// Recovers a deleted message
     /// The opposite of `delete_message`
-    pub fn restore_message(&self, msg_number: u32) -> crate::Result<()> {
-        self.set_attributes(msg_number, 0, attributes::MSG_DELETED)
+    pub fn restore_message(&mut self, msg_number: u32) -> crate::Result<()> {
+        if self.set_attributes(msg_number, 0, attributes::MSG_DELETED)? {
+            self.header_info.active_msgs = self.header_info.active_msgs.saturating_add(1);
+            self.write_jhr_header()?;
+        }
+        Ok(())
     }
 
     pub fn read_last_read_file(&self) -> crate::Result<Vec<JamLastReadStorage>> {
@@ -389,27 +546,41 @@ impl JamMessageBase {
 
     pub fn write_last_read(&self, opt: JamLastReadStorage) -> crate::Result<()> {
         let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
-        let mut file = fs::OpenOptions::new().write(true).open(last_read_file_name)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(last_read_file_name)?;
         const LEN: u64 = 16;
         file.seek(SeekFrom::Start(self.last_read_record as u64 * LEN))?;
         opt.write(&mut file)?;
         Ok(())
     }
 
-    pub fn create_last_read(&mut self, user_name_crc: u32, id: u32) -> crate::Result<JamLastReadStorage> {
-        let mut opt = JamLastReadStorage::default();
-        opt.user_crc = user_name_crc;
-        opt.user_id = id;
+    pub fn create_last_read(
+        &mut self,
+        user_name_crc: u32,
+        id: u32,
+    ) -> crate::Result<JamLastReadStorage> {
+        let opt = JamLastReadStorage {
+            user_crc: user_name_crc,
+            user_id: id,
+            ..Default::default()
+        };
         let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
 
-        let mut file = fs::OpenOptions::new().append(true).open(last_read_file_name)?;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(last_read_file_name)?;
         const LEN: u64 = 16;
-        self.last_read_record = (file.metadata().unwrap().len() / LEN) as i32;
+        self.last_read_record = (file.metadata()?.len() / LEN) as i32;
         opt.write(&mut file)?;
         Ok(opt)
     }
 
-    pub fn find_last_read(&mut self, user_name_crc: u32, id: u32) -> crate::Result<Option<JamLastReadStorage>> {
+    pub fn find_last_read(
+        &mut self,
+        user_name_crc: u32,
+        id: u32,
+    ) -> crate::Result<Option<JamLastReadStorage>> {
         let last_read_file_name = self.file_name.with_extension(extensions::LASTREAD_INFO);
         let file = File::open(last_read_file_name)?;
         let mut reader = BufReader::new(file);
@@ -447,61 +618,60 @@ impl JamMessageBase {
         Ok(None)
     }
 
-    /// Gixes back all the record number (+BaseMsgNum) within the .JDX file determines a message's number for a given user.
+    /// Message numbers of every index record addressed to the given name CRC.
+    ///
+    /// The record number within the .JDX file plus `BaseMsgNum` is the message
+    /// number, which is what this returns. Empty slots are skipped.
     pub fn search_message_index(&self, crc: u32) -> crate::Result<Vec<u32>> {
         let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
         let index_file = fs::read(index_file_name)?;
 
-        if index_file.len() % 8 != 0 {
-            return Err(Box::new(JamError::IndexFileCorrupted));
+        if !index_file.len().is_multiple_of(INDEX_RECORD_SIZE) {
+            return Err(JamError::IndexFileCorrupted.into());
         }
-        // all indices need to be scanned so it can be done in parallel
         let needle = crc.to_le_bytes();
-        let res = (0..index_file.len() / 8)
-            .into_par_iter()
-            .filter(|o| {
-                let i = o << 3;
-                index_file[i..].starts_with(&needle)
-            })
-            .map(|i| {
-                let data = &index_file[i + 4..];
-                convert_single_u32!(msg_num, data);
-                msg_num
-            })
-            .collect();
+        let empty = EMPTY_SLOT.to_le_bytes();
+        let base = self.header_info.base_msg_num;
+        let hit = move |(record, data): (usize, &[u8])| -> Option<u32> {
+            if data[0..4] == needle && data[4..8] != empty {
+                Some(base + record as u32)
+            } else {
+                None
+            }
+        };
+
+        // All records have to be looked at, so large indices are worth splitting up.
+        let res = if index_file.len() / INDEX_RECORD_SIZE < PARALLEL_SEARCH_THRESHOLD {
+            index_file
+                .chunks_exact(INDEX_RECORD_SIZE)
+                .enumerate()
+                .filter_map(hit)
+                .collect()
+        } else {
+            index_file
+                .par_chunks_exact(INDEX_RECORD_SIZE)
+                .enumerate()
+                .filter_map(hit)
+                .collect()
+        };
         Ok(res)
     }
 
-    /* Single threaded version:
-    pub fn search_index(&self, crc: u32) -> Result<Vec<u32>, Box<dyn Error>> {
-        let index_file_name = self.file_name.with_extension(extensions::MESSAGE_INDEX);
-
-        let mut res = Vec::new();
-
-        let mut index_file = fs::read(index_file_name)?;
-        let needle = crc.to_le_bytes();
-
-        let mut i = 0;
-        while i < index_file.len() {
-            if index_file[i..].starts_with(&needle) {
-                let mut data = &mut index_file[i + 4..];
-                convert_u32!(msg_num, data);
-                res.push(msg_num);
-            }
-            i += 8;
-        }
-        Ok(res)
-    }*/
-
-    pub fn iter(&self) -> impl Iterator<Item = crate::Result<JamMessageHeader>> {
+    /// Iterates the message headers in the order they are stored in the .JHR file.
+    ///
+    /// Note that this walks the header file, so superseded and deleted records
+    /// show up as well.
+    pub fn iter(
+        &self,
+    ) -> crate::Result<impl Iterator<Item = crate::Result<JamMessageHeader>> + use<>> {
         let header_file_name = self.file_name.with_extension(extensions::HEADER_DATA);
-        let mut f = File::open(header_file_name).unwrap();
-        let size = f.metadata().unwrap().len();
-        f.seek(std::io::SeekFrom::Start(JHRHeaderInfo::JHR_HEADER_SIZE)).unwrap();
-        JamBaseMessageIter {
+        let mut f = File::open(header_file_name)?;
+        let size = f.metadata()?.len();
+        f.seek(SeekFrom::Start(JhrHeaderInfo::JHR_HEADER_SIZE))?;
+        Ok(JamBaseMessageIter {
             reader: BufReader::new(f),
             size,
-        }
+        })
     }
 }
 
@@ -514,14 +684,46 @@ impl Iterator for JamBaseMessageIter {
     type Item = crate::Result<JamMessageHeader>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(pos) = self.reader.stream_position() {
-            if pos >= self.size {
-                return None;
-            }
-            Some(JamMessageHeader::read(&mut self.reader))
-        } else {
-            None
+        match self.reader.stream_position() {
+            Ok(pos) if pos >= self.size => None,
+            Ok(_) => Some(JamMessageHeader::read(&mut self.reader)),
+            Err(err) => Some(Err(err.into())),
         }
+    }
+}
+
+/// Releases the message base lock when dropped.
+pub struct JamLockGuard<'a> {
+    base: &'a JamMessageBase,
+}
+
+impl Drop for JamLockGuard<'_> {
+    fn drop(&mut self) {
+        self.base.unlock();
+    }
+}
+
+/// Length of a file, treating a missing file as empty.
+fn file_len(path: &Path) -> crate::Result<u64> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(meta.len()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Undoes a partial append so a failed write does not leave a torn record behind.
+fn rollback(path: &Path, len: u64) {
+    if let Err(err) = OpenOptions::new()
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .and_then(|f| f.set_len(len))
+    {
+        log::error!(
+            "Could not roll back {} to {len} bytes: {err}",
+            path.display()
+        );
     }
 }
 
@@ -535,10 +737,10 @@ pub struct JamMessage {
 }
 
 impl JamMessage {
-    pub fn get_msg_number(&self) -> u32 {
+    pub fn message_number(&self) -> u32 {
         self.header.message_number
     }
-    pub fn get_msgid_crc(&self) -> u32 {
+    pub fn msgid_crc(&self) -> u32 {
         self.header.msgid_crc
     }
 
@@ -553,7 +755,7 @@ impl JamMessage {
 
         let rnd: u32 = fastrand::u32(..);
         let id = BString::from(format!("{} {:08x}", aka, rnd));
-        let msgid_crc = JamMessageBase::get_crc(&id);
+        let msgid_crc = JamMessageBase::crc(&id);
 
         JamMessage {
             header: JamMessageHeader {
@@ -575,29 +777,35 @@ impl JamMessage {
     /// Keeps the id a message arrived with instead of making up a new one, which
     /// is what lets two systems agree that they are looking at the same message.
     pub fn with_msg_id(mut self, id: BString) -> Self {
-        self.header.msgid_crc = JamMessageBase::get_crc(&id);
-        self.header.sub_fields.push(MessageSubfield::new(SubfieldType::MsgID, id));
+        self.header.msgid_crc = JamMessageBase::crc(&id);
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::MsgID, id));
         self
     }
 
     pub fn with_reply_id(mut self, id: BString) -> Self {
-        self.header.replycrc = JamMessageBase::get_crc(&id);
-        self.header.sub_fields.push(MessageSubfield::new(SubfieldType::ReplyID, id));
+        self.header.reply_crc = JamMessageBase::crc(&id);
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::ReplyID, id));
         self
     }
 
     pub fn with_date_time(mut self, time: DateTime<Utc>) -> Self {
         self.header.date_written = time.timestamp() as u32;
-        self.header
-            .sub_fields
-            .push(MessageSubfield::new(SubfieldType::DateWritten, BString::from(time.to_rfc3339())));
+        self.header.sub_fields.push(MessageSubfield::new(
+            SubfieldType::DateWritten,
+            BString::from(time.to_rfc3339()),
+        ));
         self
     }
 
     pub fn with_packout_date(mut self, time: DateTime<Utc>) -> Self {
-        self.header
-            .sub_fields
-            .push(MessageSubfield::new(SubfieldType::PackoutDate, BString::from(time.to_rfc3339())));
+        self.header.sub_fields.push(MessageSubfield::new(
+            SubfieldType::PackoutDate,
+            BString::from(time.to_rfc3339()),
+        ));
         self
     }
 
@@ -611,22 +819,28 @@ impl JamMessage {
     }
 
     pub fn with_password(mut self, password: &BString) -> Self {
-        self.header.password_crc = JamMessageBase::get_crc(password);
+        self.header.password_crc = JamMessageBase::crc(password);
         self
     }
 
     pub fn with_from(mut self, name: BString) -> Self {
-        self.header.sub_fields.push(MessageSubfield::new(SubfieldType::SenderName, name));
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::SenderName, name));
         self
     }
 
     pub fn with_to(mut self, name: BString) -> Self {
-        self.header.sub_fields.push(MessageSubfield::new(SubfieldType::RecvName, name));
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::RecvName, name));
         self
     }
 
     pub fn with_subject(mut self, subject: BString) -> Self {
-        self.header.sub_fields.push(MessageSubfield::new(SubfieldType::Subject, subject));
+        self.header
+            .sub_fields
+            .push(MessageSubfield::new(SubfieldType::Subject, subject));
         self
     }
 
@@ -644,7 +858,7 @@ impl JamMessage {
         self
     }
 
-    pub fn get_text(&self) -> &BString {
+    pub fn text(&self) -> &BString {
         &self.text
     }
 
@@ -652,46 +866,36 @@ impl JamMessage {
         self.header.clone()
     }
 
-    pub fn get_reply_to(&self) -> u32 {
+    pub fn reply_to(&self) -> u32 {
         self.header.reply_to
     }
 
-    pub fn get_reply1st(&self) -> u32 {
-        self.header.reply1st
+    pub fn reply_first(&self) -> u32 {
+        self.header.reply_first
     }
 
-    pub fn get_replynext(&self) -> u32 {
-        self.header.replynext
+    pub fn reply_next(&self) -> u32 {
+        self.header.reply_next
     }
 
-    pub fn get_from(&self) -> Option<&BString> {
-        for sub in self.header.sub_fields.iter() {
-            if *sub.get_type() == SubfieldType::SenderName {
-                return Some(sub.get_string());
-            }
-        }
-        None
+    pub fn from(&self) -> Option<&BString> {
+        self.header.from()
     }
 
-    pub fn get_to(&self) -> Option<&BString> {
-        for sub in self.header.sub_fields.iter() {
-            if *sub.get_type() == SubfieldType::RecvName {
-                return Some(sub.get_string());
-            }
-        }
-        None
+    pub fn to(&self) -> Option<&BString> {
+        self.header.to()
     }
 
     pub fn set_reply_crc(&mut self, crc: u32) {
-        self.header.replycrc = crc;
+        self.header.reply_crc = crc;
     }
 
-    pub fn set_reply1st(&mut self, reply1st: u32) {
-        self.header.reply1st = reply1st;
+    pub fn set_reply_first(&mut self, reply_first: u32) {
+        self.header.reply_first = reply_first;
     }
 
-    pub fn set_replynext(&mut self, replynext: u32) {
-        self.header.replynext = replynext;
+    pub fn set_reply_next(&mut self, reply_next: u32) {
+        self.header.reply_next = reply_next;
     }
 
     pub(crate) fn is_deleted(&self) -> bool {

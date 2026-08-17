@@ -6,10 +6,7 @@ use crate::{
     pcboard::{DATE_LEN, FROM_TO_LEN, PASSWORD_LEN, TIME_LEN},
     util::basic_real::BasicReal,
 };
-use std::{
-    fs::File,
-    io::{BufReader, Read},
-};
+use std::io::Read;
 
 pub enum MessageType {
     Public,
@@ -179,7 +176,7 @@ impl PCBoardMessageHeader {
         self.reply_status == REPLIED
     }
 
-    pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
+    pub fn read<R: Read>(file: &mut R) -> crate::Result<Self> {
         let data = &mut [0; Self::HEADER_SIZE];
         file.read_exact(data)?;
         let mut data = &data[..];
@@ -327,7 +324,7 @@ impl ExtendedHeaderInformation {
         Err(PCBoardError::UnknownExtendedHeader(BString::new(data.to_vec())).into())
     }
 
-    pub fn to_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::To => "TO     ",
             Self::From => "FROM   ",
@@ -361,14 +358,23 @@ impl PCBoardExtendedHeader {
     const FUNC_LEN: usize = 7;
     const DESC_LEN: usize = 60;
 
-    pub fn read(&self) -> bool {
+    /// Stride of one extended header record inside the message body.
+    pub(crate) const RECORD_SIZE: usize = 0x48;
+
+    pub fn is_read(&self) -> bool {
         self.status == b'R'
     }
 
     pub fn deserialize(buf: &[u8]) -> crate::Result<Self> {
         // let _id = u16::from_le_bytes([buf[0], buf[1]]);
         let mut i = 2;
-        let function = ExtendedHeaderInformation::from_data(&buf[i..i + Self::FUNC_LEN]).unwrap();
+        if buf.len() < i + Self::FUNC_LEN + 1 + Self::DESC_LEN + 1 {
+            return Err(crate::Error::pcboard(
+                0,
+                "extended header record is too short",
+            ));
+        }
+        let function = ExtendedHeaderInformation::from_data(&buf[i..i + Self::FUNC_LEN])?;
         i += Self::FUNC_LEN + 1; // skip ':'
 
         let content = convert_pcboard_str(&buf[i..i + Self::DESC_LEN]);

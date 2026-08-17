@@ -9,14 +9,16 @@ use crate::{
         msg_header::{MessageSubfield, SubfieldType},
     },
     pcboard::{PCBoardMessage, PCBoardMessageBase, message_header::ExtendedHeaderInformation},
-    util::{cp437::get_utf8, echmoail::EchomailAddress},
+    util::{cp437::to_utf8, echomail::EchomailAddress},
 };
 
-fn get_jam_attributes(msg: &PCBoardMessage) -> u32 {
+fn jam_attributes(msg: &PCBoardMessage) -> u32 {
     let mut result = 0;
-    match msg.get_status() {
-        crate::pcboard::MessageStatus::Private | crate::pcboard::MessageStatus::CommentToSysop => result |= jam::attributes::MSG_PRIVATE,
-        _ => {}
+    if matches!(
+        msg.status(),
+        crate::pcboard::MessageStatus::Private | crate::pcboard::MessageStatus::CommentToSysop
+    ) {
+        result |= jam::attributes::MSG_PRIVATE;
     }
 
     if msg.is_read() {
@@ -38,16 +40,21 @@ fn get_jam_attributes(msg: &PCBoardMessage) -> u32 {
     result
 }
 
-pub fn convert_pcboard_to_jam(pcboard_path: &Path, jam_dest_path: &Path, aka: &EchomailAddress) -> crate::Result<()> {
+pub fn convert_pcboard_to_jam(
+    pcboard_path: &Path,
+    jam_dest_path: &Path,
+    aka: &EchomailAddress,
+) -> crate::Result<()> {
     let pcb_base = PCBoardMessageBase::open(pcboard_path)?;
 
     let mut jam_messages = BTreeMap::new();
     let mut message_ids = HashMap::new();
-    let mut cur_msg = 0;
+    // JAM numbers the messages from BaseMsgNum, which is 1 for a fresh base.
+    let mut cur_msg = 1;
     let mut number_map = HashMap::new();
-    for msg_result in pcb_base.iter() {
+    for msg_result in pcb_base.iter()? {
         let msg = msg_result?;
-        let attribute = get_jam_attributes(&msg);
+        let attribute = jam_attributes(&msg);
         let time = msg.header.date_time();
 
         let mut to = msg.header.to_field;
@@ -91,20 +98,22 @@ pub fn convert_pcboard_to_jam(pcboard_path: &Path, jam_dest_path: &Path, aka: &E
             }
         }
 
-        number_map.insert(msg.header.msg_number, cur_msg);
         let new_msg = JamMessage::new(cur_msg, aka)
             .with_reply_to(*number_map.get(&msg.header.reply_to).unwrap_or(&0))
             .with_date_time(time.and_utc())
-            .with_text(get_utf8(&msg.text).into())
+            .with_text(to_utf8(&msg.text).into())
             .with_attributes(attribute)
             .with_password(&msg.header.password)
-            .with_from(get_utf8(&from).into())
-            .with_to(get_utf8(&to).into())
-            .with_subject(get_utf8(&subj).into());
+            .with_from(to_utf8(&from).into())
+            .with_to(to_utf8(&to).into())
+            .with_subject(to_utf8(&subj).into());
         if new_msg.is_deleted() {
             continue;
         }
-        message_ids.insert(cur_msg, new_msg.get_msgid_crc());
+        // Only messages that survive get a number, otherwise a reply would
+        // point at whichever message reuses the slot.
+        number_map.insert(msg.header.msg_number, cur_msg);
+        message_ids.insert(cur_msg, new_msg.msgid_crc());
         jam_messages.insert(cur_msg, new_msg);
         cur_msg += 1;
     }
@@ -114,20 +123,21 @@ pub fn convert_pcboard_to_jam(pcboard_path: &Path, jam_dest_path: &Path, aka: &E
     // Does it even make any sense at all?
     let mut reply_next = Vec::new();
     for (i, msg) in &mut jam_messages {
-        let reply_to = msg.get_reply_to();
-        if reply_to != 0 && reply_to != *i {
-            if let Some(crc) = message_ids.get_mut(&reply_to) {
-                msg.set_reply_crc(*crc);
-                reply_next.push((reply_to, *i));
-            }
+        let reply_to = msg.reply_to();
+        if reply_to != 0
+            && reply_to != *i
+            && let Some(crc) = message_ids.get_mut(&reply_to)
+        {
+            msg.set_reply_crc(*crc);
+            reply_next.push((reply_to, *i));
         }
     }
 
     for (reply_to, rep1st) in reply_next {
-        if let Some(msg) = jam_messages.get_mut(&reply_to) {
-            if msg.get_reply1st() == 0 {
-                msg.set_reply1st(rep1st);
-            }
+        if let Some(msg) = jam_messages.get_mut(&reply_to)
+            && msg.reply_first() == 0
+        {
+            msg.set_reply_first(rep1st);
         }
     }
 
@@ -151,7 +161,12 @@ mod tests {
     fn test_read_message() {
         let tmpdir = TempDir::with_prefix_in("jamtest", ".").unwrap();
         let converted = tmpdir.path().join("jambase");
-        convert_pcboard_to_jam(&PathBuf::from("data/pcboard/test"), &converted, &EchomailAddress::default()).unwrap();
+        convert_pcboard_to_jam(
+            &PathBuf::from("data/pcboard/test"),
+            &converted,
+            &EchomailAddress::default(),
+        )
+        .unwrap();
 
         let pcb = PCBoardMessageBase::open("data/pcboard/test").unwrap();
         let jam = JamMessageBase::open(&converted).unwrap();
@@ -161,12 +176,12 @@ mod tests {
         for i in 1..=pcb.active_messages() {
             let pcb_msg = pcb.read_message(i).unwrap();
             let jam_msg = jam.read_header(i).unwrap();
-            let jam_txt = jam.read_msg_text(&jam_msg).unwrap();
+            let jam_txt = jam.read_message_text(&jam_msg).unwrap();
 
             assert!(pcb_msg.header.msg_number == jam_msg.message_number);
-            assert!(pcb_msg.header.to_field == *jam_msg.get_to().unwrap());
-            assert!(pcb_msg.header.from_field == *jam_msg.get_from().unwrap());
-            assert!(pcb_msg.header.subj_field == *jam_msg.get_subject().unwrap());
+            assert!(pcb_msg.header.to_field == *jam_msg.to().unwrap());
+            assert!(pcb_msg.header.from_field == *jam_msg.from().unwrap());
+            assert!(pcb_msg.header.subj_field == *jam_msg.subject().unwrap());
             assert!(pcb_msg.text == jam_txt);
         }
     }

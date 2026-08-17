@@ -1,20 +1,22 @@
-use std::{
-    fs::File,
-    io::{BufReader, BufWriter, Read, Write},
-};
+use std::io::{Read, Write};
 
 use bstr::BString;
 
 use crate::{
+    Error,
     jam::{JAM_SIGNATURE, JamError},
     util::crc32::CRC_SEED,
 };
 
 use super::{JamMessageBase, attributes};
 
+/// Longest subfield block accepted, the fixed header only reserves a u32 for it
+/// and the specification caps individual subfields far below this.
+const MAX_SUBFIELD_DATA: u32 = 1 << 20;
+
 #[derive(Clone, Debug)]
 pub struct JamMessageHeader {
-    /// <J><A><M> followed by <NUL>
+    /// `<J><A><M>` followed by `<NUL>`
     //pub signature: u32,
 
     /// Revision level of header
@@ -56,16 +58,16 @@ pub struct JamMessageHeader {
     /// When calculating the CRC-32 of the MSGID and REPLY lines, the
     /// text ^aMSGID: and ^aREPLY: should be removed as well as all
     /// leading and trailing white space characters.
-    pub replycrc: u32,
+    pub reply_crc: u32,
 
     /// This msg is a reply to..
     pub reply_to: u32,
 
     /// First reply to this msg
-    pub reply1st: u32,
+    pub reply_first: u32,
 
     /// Next msg in reply chain
-    pub replynext: u32,
+    pub reply_next: u32,
 
     /// When msg was written (UNIX time)
     pub date_written: u32,
@@ -105,10 +107,10 @@ impl Default for JamMessageHeader {
             sub_fields: Vec::new(),
             times_read: 0,
             msgid_crc: CRC_SEED,
-            replycrc: CRC_SEED,
+            reply_crc: CRC_SEED,
             reply_to: 0,
-            reply1st: 0,
-            replynext: 0,
+            reply_first: 0,
+            reply_next: 0,
             date_written: 0,
             date_received: 0,
             date_processed: 0,
@@ -126,27 +128,27 @@ impl Default for JamMessageHeader {
 impl JamMessageHeader {
     pub const FIXED_HEADER_SIZE: usize = 76;
 
-    pub fn get_subject(&self) -> Option<&BString> {
+    pub fn subject(&self) -> Option<&BString> {
         for s in &self.sub_fields {
-            if s.get_type() == &SubfieldType::Subject {
+            if s.field_type() == SubfieldType::Subject {
                 return Some(&s.content);
             }
         }
         None
     }
 
-    pub fn get_from(&self) -> Option<&BString> {
+    pub fn from(&self) -> Option<&BString> {
         for s in &self.sub_fields {
-            if s.get_type() == &SubfieldType::SenderName {
+            if s.field_type() == SubfieldType::SenderName {
                 return Some(&s.content);
             }
         }
         None
     }
 
-    pub fn get_to(&self) -> Option<&BString> {
+    pub fn to(&self) -> Option<&BString> {
         for s in &self.sub_fields {
-            if s.get_type() == &SubfieldType::RecvName {
+            if s.field_type() == SubfieldType::RecvName {
                 return Some(&s.content);
             }
         }
@@ -168,12 +170,13 @@ impl JamMessageHeader {
     /// Replaces the content of the first subfield of that type, or appends one.
     fn set_sub_field(&mut self, field_type: SubfieldType, content: BString) {
         for s in &mut self.sub_fields {
-            if s.get_type() == &field_type {
+            if s.field_type() == field_type {
                 s.content = content;
                 return;
             }
         }
-        self.sub_fields.push(MessageSubfield::new(field_type, content));
+        self.sub_fields
+            .push(MessageSubfield::new(field_type, content));
     }
 
     pub fn set_deleted(&mut self, deleted: bool) {
@@ -191,19 +194,20 @@ impl JamMessageHeader {
 
     /// Checks if a password is valid.
     pub fn is_password_valid(&self, password: &str) -> bool {
-        self.password_crc == CRC_SEED || self.password_crc == JamMessageBase::get_crc(&BString::new(password.as_bytes().to_vec()))
+        self.password_crc == CRC_SEED
+            || self.password_crc == JamMessageBase::crc(&BString::new(password.as_bytes().to_vec()))
     }
 
-    pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
+    pub fn read<R: Read>(file: &mut R) -> crate::Result<Self> {
         let data = &mut [0; Self::FIXED_HEADER_SIZE];
         file.read_exact(data)?;
         if !data.starts_with(&JAM_SIGNATURE) {
-            return Err(Box::new(JamError::InvalidHeaderSignature));
+            return Err(JamError::InvalidHeaderSignature.into());
         }
         let data = &data[4..];
         convert_single_u16!(revision, data);
         if revision != 1 {
-            return Err(Box::new(JamError::UnsupportedMessageHeaderRevision(revision)));
+            return Err(JamError::UnsupportedMessageHeaderRevision(revision).into());
         }
         let mut data = &data[4..];
         // convert_u32!(reserved_word, data);
@@ -225,8 +229,28 @@ impl JamMessageHeader {
         convert_u32!(password_crc, data);
         convert_u32!(cost, data);
 
-        let mut subfield_data = vec![0; subfield_data_len as usize];
-        file.read_exact(&mut subfield_data)?;
+        let mut subfield_data = Vec::new();
+        if subfield_data_len > MAX_SUBFIELD_DATA {
+            return Err(Error::jam(
+                0,
+                format!(
+                    "subfield block of {subfield_data_len} bytes exceeds the {MAX_SUBFIELD_DATA} byte limit"
+                ),
+            ));
+        }
+        // Grow with the data instead of trusting the length field up front.
+        file.by_ref()
+            .take(subfield_data_len as u64)
+            .read_to_end(&mut subfield_data)?;
+        if subfield_data.len() != subfield_data_len as usize {
+            return Err(Error::jam(
+                0,
+                format!(
+                    "subfield block truncated, expected {subfield_data_len} bytes, got {}",
+                    subfield_data.len()
+                ),
+            ));
+        }
 
         let mut sub_fields = Vec::new();
         let mut idx = 0;
@@ -239,10 +263,10 @@ impl JamMessageHeader {
             sub_fields,
             times_read,
             msgid_crc,
-            replycrc: reply_crc,
+            reply_crc,
             reply_to,
-            reply1st,
-            replynext,
+            reply_first: reply1st,
+            reply_next: replynext,
             date_written,
             date_received,
             date_processed,
@@ -256,20 +280,24 @@ impl JamMessageHeader {
         })
     }
 
-    pub fn write(&self, file: &mut BufWriter<File>) -> crate::Result<()> {
+    pub fn write<W: Write>(&self, file: &mut W) -> crate::Result<()> {
         file.write_all(&JAM_SIGNATURE)?;
         // revision
         file.write_all(&u16::to_le_bytes(1))?;
         // reserved_word
         file.write_all(&u16::to_le_bytes(0))?;
-        let subfield_data_len = self.sub_fields.iter().map(|sf| 8 + sf.content.len()).sum::<usize>();
+        let subfield_data_len = self
+            .sub_fields
+            .iter()
+            .map(|sf| 8 + sf.content.len())
+            .sum::<usize>();
         file.write_all(&u32::to_le_bytes(subfield_data_len as u32))?;
         file.write_all(&self.times_read.to_le_bytes())?;
         file.write_all(&self.msgid_crc.to_le_bytes())?;
-        file.write_all(&self.replycrc.to_le_bytes())?;
+        file.write_all(&self.reply_crc.to_le_bytes())?;
         file.write_all(&self.reply_to.to_le_bytes())?;
-        file.write_all(&self.reply1st.to_le_bytes())?;
-        file.write_all(&self.replynext.to_le_bytes())?;
+        file.write_all(&self.reply_first.to_le_bytes())?;
+        file.write_all(&self.reply_next.to_le_bytes())?;
         file.write_all(&self.date_written.to_le_bytes())?;
         file.write_all(&self.date_received.to_le_bytes())?;
         file.write_all(&self.date_processed.to_le_bytes())?;
@@ -529,15 +557,18 @@ pub struct MessageSubfield {
 
 impl MessageSubfield {
     pub fn new(field_type: SubfieldType, content: BString) -> Self {
-        Self { field_type, content }
+        Self {
+            field_type,
+            content,
+        }
     }
 
-    pub fn get_string(&self) -> &BString {
+    pub fn content(&self) -> &BString {
         &self.content
     }
 
-    pub fn get_type(&self) -> &SubfieldType {
-        &self.field_type
+    pub fn field_type(&self) -> SubfieldType {
+        self.field_type
     }
 
     fn deserialize(subfield_data: &[u8], idx: &mut usize) -> crate::Result<Self> {
@@ -548,7 +579,9 @@ impl MessageSubfield {
         convert_u32!(id, data);
         convert_u32!(data_len, data);
         *idx += 8;
-        let end = *idx + data_len as usize;
+        let Some(end) = idx.checked_add(data_len as usize) else {
+            return Err(JamError::InvalidSubfieldLength(data_len, subfield_data.len()).into());
+        };
         if end > subfield_data.len() {
             return Err(JamError::InvalidSubfieldLength(data_len, subfield_data.len()).into());
         }

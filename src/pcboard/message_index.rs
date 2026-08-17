@@ -1,7 +1,4 @@
-use std::{
-    fs::File,
-    io::{BufReader, Read},
-};
+use std::io::Read;
 
 use bstr::BString;
 
@@ -28,7 +25,7 @@ pub struct PCBoardMessageIndex {
 impl PCBoardMessageIndex {
     pub const HEADER_SIZE: usize = 4 + 4 + 25 + 25 + 1 + 2 + 3;
 
-    pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
+    pub fn read<R: Read>(file: &mut R) -> crate::Result<Self> {
         let data = &mut [0; Self::HEADER_SIZE];
         file.read_exact(data)?;
         let mut data = &data[..];
