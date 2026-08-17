@@ -1,6 +1,6 @@
 [package]
 name = "jamjam"
-version = "0.4.0"
+version = "0.3.0"
 edition = "2024"
 # 1.89 stabilised std::fs::File::lock, used to guard the message base.
 rust-version = "1.89"

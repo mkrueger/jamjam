@@ -347,6 +347,48 @@ fn test_messages_returns_only_live_indexed_headers_in_number_order() {
 }
 
 #[test]
+fn test_iteration_matches_random_access_when_headers_are_out_of_order() {
+    let dir = TempDir::new().unwrap();
+    let mut base = JamMessageBase::create(dir.path().join("scattered")).unwrap();
+    for number in 1..=20 {
+        base.write_message(&message(&format!("text-{number}"), "all"))
+            .unwrap();
+    }
+    // Replacing a header appends it, so the JHR order stops matching the index.
+    for number in [7, 3, 19, 11] {
+        let mut header = base.read_header(number).unwrap();
+        header.set_subject(BString::from(format!("updated-{number}")));
+        raw::update_header(&mut base, number, &header).unwrap();
+    }
+    base.delete_message(5).unwrap();
+
+    let expected: Vec<_> = (1..=20)
+        .filter(|number| *number != 5)
+        .map(|number| {
+            let header = base.read_header(number).unwrap();
+            let text = base.read_message_text(&header).unwrap();
+            (number, header.subject().unwrap().clone(), text)
+        })
+        .collect();
+
+    let walked: Vec<_> = base
+        .messages_full()
+        .collect::<jamjam::Result<Vec<_>>>()
+        .unwrap()
+        .into_iter()
+        .map(|msg| {
+            (
+                msg.header().message_number,
+                msg.header().subject().unwrap().clone(),
+                msg.text().clone(),
+            )
+        })
+        .collect();
+
+    assert_eq!(walked, expected);
+}
+
+#[test]
 fn test_read_message_returns_header_and_text() {
     let dir = TempDir::new().unwrap();
     let mut base = JamMessageBase::create(dir.path().join("full")).unwrap();

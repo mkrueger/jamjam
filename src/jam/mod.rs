@@ -636,26 +636,56 @@ impl JamMessageBase {
     /// Empty and deleted slots are skipped. Physical JHR traversal, including
     /// retired records, is available in [`raw::physical_headers`].
     ///
+    /// The index and the header file are opened once for the whole walk, so
+    /// this is much cheaper than calling [`Self::read_header`] in a loop.
+    ///
     /// The walk is not locked. Take [`Self::lock_shared`] or
     /// [`Self::read_transaction`] if a writer may be packing or appending.
     pub fn messages(&self) -> impl Iterator<Item = crate::Result<JamMessageHeader>> + use<'_> {
-        (self.lowest_message_number()..=self.highest_message_number()).filter_map(move |number| {
-            match self.read_header(number) {
-                Ok(header) => Some(Ok(header)),
-                Err(crate::Error::Jam(JamError::MessageDeleted)) => None,
-                Err(err) => Some(Err(err)),
+        let mut reader = IndexedReader::open(self).map_err(Some);
+        let mut numbers = self.lowest_message_number()..=self.highest_message_number();
+        std::iter::from_fn(move || {
+            let reader = match &mut reader {
+                Ok(reader) => reader,
+                Err(err) => return err.take().map(Err),
+            };
+            loop {
+                let number = numbers.next()?;
+                match reader.header(number) {
+                    Ok(Some(header)) => return Some(Ok(header)),
+                    Ok(None) => continue,
+                    Err(err) => return Some(Err(err)),
+                }
             }
         })
     }
 
     /// Live messages with their text, in message-number order.
     ///
-    /// Like [`Self::messages`], this is not locked on its own.
+    /// Like [`Self::messages`] the files are opened once, and the walk is not
+    /// locked on its own.
     pub fn messages_full(&self) -> impl Iterator<Item = crate::Result<JamMessage>> + use<'_> {
-        self.messages().map(|header| {
-            let header = header?;
-            let text = self.read_message_text(&header)?;
-            Ok(JamMessage::from_stored(header, text))
+        let mut readers = IndexedReader::open(self)
+            .and_then(|headers| Ok((headers, TextReader::open(self)?)))
+            .map_err(Some);
+        let mut numbers = self.lowest_message_number()..=self.highest_message_number();
+        std::iter::from_fn(move || {
+            let (headers, text) = match &mut readers {
+                Ok((headers, text)) => (headers, text),
+                Err(err) => return err.take().map(Err),
+            };
+            loop {
+                let number = numbers.next()?;
+                let header = match headers.header(number) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => continue,
+                    Err(err) => return Some(Err(err)),
+                };
+                return Some(
+                    text.text(&header)
+                        .map(|text| JamMessage::from_stored(header, text)),
+                );
+            }
         })
     }
 
@@ -1124,6 +1154,93 @@ impl Iterator for JamBaseMessageIter {
             Err(err) => Some(Err(err.into())),
         }
     }
+}
+
+/// Reads headers through the index without reopening the files per message.
+struct IndexedReader {
+    index: Vec<u8>,
+    headers: BufReader<File>,
+    base_msg_num: u32,
+}
+
+impl IndexedReader {
+    fn open(base: &JamMessageBase) -> crate::Result<Self> {
+        let index = fs::read(base.file_name.with_extension(extensions::MESSAGE_INDEX))?;
+        if !index.len().is_multiple_of(INDEX_RECORD_SIZE) {
+            return Err(JamError::IndexFileCorrupted.into());
+        }
+        let headers = File::open(base.file_name.with_extension(extensions::HEADER_DATA))?;
+        Ok(Self {
+            index,
+            headers: BufReader::new(headers),
+            base_msg_num: base.lowest_message_number(),
+        })
+    }
+
+    /// The header of a live message, or `None` for an empty or deleted slot.
+    fn header(&mut self, msg_number: u32) -> crate::Result<Option<JamMessageHeader>> {
+        let Some(record) = msg_number.checked_sub(self.base_msg_num) else {
+            return Ok(None);
+        };
+        let start = record as usize * INDEX_RECORD_SIZE + 4;
+        let Some(bytes) = self.index.get(start..start + 4) else {
+            return Ok(None);
+        };
+        let offset = u32::from_le_bytes(bytes.try_into().unwrap_or_default());
+        if offset == EMPTY_SLOT {
+            return Ok(None);
+        }
+
+        seek_buffered(&mut self.headers, offset as u64)?;
+        let header = JamMessageHeader::read(&mut self.headers)?;
+        if header.message_number != msg_number {
+            return Err(
+                JamError::IndexMessageNumberMismatch(msg_number, header.message_number).into(),
+            );
+        }
+        Ok((!header.is_deleted()).then_some(header))
+    }
+}
+
+/// Reads message text without reopening the .JDT file per message.
+struct TextReader {
+    file: BufReader<File>,
+    len: u64,
+}
+
+impl TextReader {
+    fn open(base: &JamMessageBase) -> crate::Result<Self> {
+        let file = File::open(base.file_name.with_extension(extensions::TEXT_DATA))?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            file: BufReader::new(file),
+            len,
+        })
+    }
+
+    fn text(&mut self, header: &JamMessageHeader) -> crate::Result<BString> {
+        let end = header.offset as u64 + header.txt_len as u64;
+        if end > self.len {
+            return Err(JamError::TextOutOfBounds(header.offset as u64, end - self.len).into());
+        }
+        seek_buffered(&mut self.file, header.offset as u64)?;
+        let mut buffer = vec![0; header.txt_len as usize];
+        self.file.read_exact(&mut buffer)?;
+        Ok(BString::new(buffer))
+    }
+}
+
+/// Seeks without dropping the buffer when the target is still inside it, which
+/// is the common case while walking records that were written in order.
+fn seek_buffered(reader: &mut BufReader<File>, offset: u64) -> crate::Result<()> {
+    let current = reader.stream_position()?;
+    match (i64::try_from(offset), i64::try_from(current)) {
+        (Ok(offset), Ok(current)) => reader.seek_relative(offset - current)?,
+        _ => {
+            reader.seek(SeekFrom::Start(offset))?;
+        }
+    }
+    Ok(())
 }
 
 /// Length of a file, treating a missing file as empty.
