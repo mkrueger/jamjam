@@ -2,12 +2,14 @@
 name = "jamjam"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Handles JAM, PCBOARD message bases & QWK packets."
 authors = ["Mike Krüger <mkrueger@posteo.de>"]
 homepage = "https://github.com/mkrueger/jamjam"
 repository = "https://github.com/mkrueger/jamjam"
-license-file = "LICENSE"
+license = "MIT OR Apache-2.0"
 keywords = ["jam", "pcboard", "qwk", "qwke", "messagebase"]
+categories = ["parser-implementations", "encoding", "filesystem"]
 
 [dependencies]
 thiserror = "2.0.17"
