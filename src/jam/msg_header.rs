@@ -6,13 +6,13 @@ use std::{
 use bstr::BString;
 
 use crate::{
-    jam::{JamError, JAM_SIGNATURE},
+    jam::{JAM_SIGNATURE, JamError},
     util::crc32::CRC_SEED,
 };
 
-use super::{attributes, JamMessageBase};
+use super::{JamMessageBase, attributes};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JamMessageHeader {
     /// <J><A><M> followed by <NUL>
     //pub signature: u32,
@@ -153,6 +153,37 @@ impl JamMessageHeader {
         None
     }
 
+    pub fn set_subject(&mut self, subject: BString) {
+        self.set_sub_field(SubfieldType::Subject, subject);
+    }
+
+    pub fn set_from(&mut self, from: BString) {
+        self.set_sub_field(SubfieldType::SenderName, from);
+    }
+
+    pub fn set_to(&mut self, to: BString) {
+        self.set_sub_field(SubfieldType::RecvName, to);
+    }
+
+    /// Replaces the content of the first subfield of that type, or appends one.
+    fn set_sub_field(&mut self, field_type: SubfieldType, content: BString) {
+        for s in &mut self.sub_fields {
+            if s.get_type() == &field_type {
+                s.content = content;
+                return;
+            }
+        }
+        self.sub_fields.push(MessageSubfield::new(field_type, content));
+    }
+
+    pub fn set_deleted(&mut self, deleted: bool) {
+        if deleted {
+            self.attributes |= attributes::MSG_DELETED;
+        } else {
+            self.attributes &= !attributes::MSG_DELETED;
+        }
+    }
+
     /// True, if a password is required to access this msg base
     pub fn needs_password(&self) -> bool {
         self.password_crc != CRC_SEED
@@ -160,9 +191,7 @@ impl JamMessageHeader {
 
     /// Checks if a password is valid.
     pub fn is_password_valid(&self, password: &str) -> bool {
-        self.password_crc == CRC_SEED
-            || self.password_crc
-                == JamMessageBase::get_crc(&BString::new(password.as_bytes().to_vec()))
+        self.password_crc == CRC_SEED || self.password_crc == JamMessageBase::get_crc(&BString::new(password.as_bytes().to_vec()))
     }
 
     pub fn read(file: &mut BufReader<File>) -> crate::Result<Self> {
@@ -174,9 +203,7 @@ impl JamMessageHeader {
         let data = &data[4..];
         convert_single_u16!(revision, data);
         if revision != 1 {
-            return Err(Box::new(JamError::UnsupportedMessageHeaderRevision(
-                revision,
-            )));
+            return Err(Box::new(JamError::UnsupportedMessageHeaderRevision(revision)));
         }
         let mut data = &data[4..];
         // convert_u32!(reserved_word, data);
@@ -235,11 +262,7 @@ impl JamMessageHeader {
         file.write_all(&u16::to_le_bytes(1))?;
         // reserved_word
         file.write_all(&u16::to_le_bytes(0))?;
-        let subfield_data_len = self
-            .sub_fields
-            .iter()
-            .map(|sf| 8 + sf.content.len())
-            .sum::<usize>();
+        let subfield_data_len = self.sub_fields.iter().map(|sf| 8 + sf.content.len()).sum::<usize>();
         file.write_all(&u32::to_le_bytes(subfield_data_len as u32))?;
         file.write_all(&self.times_read.to_le_bytes())?;
         file.write_all(&self.msgid_crc.to_le_bytes())?;
@@ -268,6 +291,22 @@ impl JamMessageHeader {
 
     pub fn is_deleted(&self) -> bool {
         self.attributes & attributes::MSG_DELETED != 0
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.attributes & attributes::MSG_LOCKED != 0
+    }
+
+    pub fn is_private(&self) -> bool {
+        self.attributes & attributes::MSG_PRIVATE != 0
+    }
+
+    pub fn is_read(&self) -> bool {
+        self.attributes & attributes::MSG_READ != 0
+    }
+
+    pub fn is_receipt_req(&self) -> bool {
+        self.attributes & attributes::MSG_RECEIPTREQ != 0
     }
 }
 
@@ -404,6 +443,17 @@ pub enum SubfieldType {
     /// hours and minutes. E.g. 0100 indicates an offset of one hour east of
     /// UTC.
     TZUTCInfo,
+
+    /// IcyBoard extensions
+
+    // Note: DateReceived doesn't make sense to add here
+    //       The unix time however can be guessed it's the next unix time after the DateWritten
+    /// Like DateWritten but as RFC3339
+    DateWritten,
+    /// Like DateProcessed but as RFC3339
+    DateProcessed,
+    // PCBoard packout date (RFC3339) for auto delete
+    PackoutDate,
 }
 
 impl From<u32> for SubfieldType {
@@ -429,6 +479,10 @@ impl From<u32> for SubfieldType {
             2002 => SubfieldType::Path2D,
             2003 => SubfieldType::Flags,
             2204 => SubfieldType::TZUTCInfo,
+
+            7001 => SubfieldType::DateWritten,
+            7002 => SubfieldType::DateProcessed,
+            7003 => SubfieldType::PackoutDate,
             _ => SubfieldType::Unknown(value),
         }
     }
@@ -457,12 +511,17 @@ impl From<SubfieldType> for u32 {
             SubfieldType::Path2D => 2002,
             SubfieldType::Flags => 2003,
             SubfieldType::TZUTCInfo => 2204,
+
+            SubfieldType::DateWritten => 7001,
+            SubfieldType::DateProcessed => 7002,
+            SubfieldType::PackoutDate => 7003,
+
             SubfieldType::Unknown(value) => value,
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MessageSubfield {
     field_type: SubfieldType,
     content: BString,
@@ -470,10 +529,7 @@ pub struct MessageSubfield {
 
 impl MessageSubfield {
     pub fn new(field_type: SubfieldType, content: BString) -> Self {
-        Self {
-            field_type,
-            content,
-        }
+        Self { field_type, content }
     }
 
     pub fn get_string(&self) -> &BString {

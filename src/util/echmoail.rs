@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EchomailAddress {
     pub zone: u16,
     pub net: u16,
@@ -10,12 +10,7 @@ pub struct EchomailAddress {
 
 impl EchomailAddress {
     pub fn new(zone: u16, net: u16, node: u16, point: u16) -> Self {
-        EchomailAddress {
-            zone,
-            net,
-            node,
-            point,
-        }
+        EchomailAddress { zone, net, node, point }
     }
 
     pub fn parse(input: &str) -> Option<Self> {
@@ -34,11 +29,7 @@ impl EchomailAddress {
                         continue;
                     }
                     if c.is_ascii_digit() {
-                        if let Some(next) = result
-                            .zone
-                            .checked_mul(10)
-                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
-                        {
+                        if let Some(next) = result.zone.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
                             result.zone = next;
                         } else {
                             return None;
@@ -58,11 +49,7 @@ impl EchomailAddress {
                         continue;
                     }
                     if c.is_ascii_digit() {
-                        if let Some(next) = result
-                            .net
-                            .checked_mul(10)
-                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
-                        {
+                        if let Some(next) = result.net.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
                             result.net = next;
                         } else {
                             return None;
@@ -83,11 +70,7 @@ impl EchomailAddress {
                     }
 
                     if c.is_ascii_digit() {
-                        if let Some(next) = result
-                            .node
-                            .checked_mul(10)
-                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
-                        {
+                        if let Some(next) = result.node.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
                             result.node = next;
                         } else {
                             return None;
@@ -102,11 +85,7 @@ impl EchomailAddress {
                         return None;
                     }
                     if c.is_ascii_digit() {
-                        if let Some(next) = result
-                            .point
-                            .checked_mul(10)
-                            .and_then(|z| z.checked_add((c as u8 - b'0') as u16))
-                        {
+                        if let Some(next) = result.point.checked_mul(10).and_then(|z| z.checked_add((c as u8 - b'0') as u16)) {
                             result.point = next;
                         } else {
                             return None;
@@ -141,6 +120,14 @@ impl fmt::Display for EchomailAddress {
             return write!(f, "{}:{}/{}", self.zone, self.net, self.node);
         }
         write!(f, "{}:{}/{}.{}", self.zone, self.net, self.node, self.point)
+    }
+}
+
+impl FromStr for EchomailAddress {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("'{}' is not a zone:net/node[.point] address", s))
     }
 }
 

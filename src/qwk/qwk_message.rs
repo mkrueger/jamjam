@@ -1,10 +1,7 @@
 use bstr::{BString, ByteSlice};
 
 use crate::{pcboard::PCB_TXT_EOL_PTR, qwk::QwkError};
-use std::{
-    fs::File,
-    io::{BufReader, BufWriter, Read, Write},
-};
+use std::io::{Read, Write};
 
 pub enum MessageType {
     Public,
@@ -90,15 +87,14 @@ impl QWKMessage {
     /// # Remarks
     /// Returns default, in case of incorrect date
     pub fn date_time(&self) -> chrono::naive::NaiveDateTime {
-        chrono::NaiveDateTime::parse_from_str(&self.date_time.to_string(), "%m-%d-%y%H:%M")
-            .unwrap_or_default()
+        chrono::NaiveDateTime::parse_from_str(&self.date_time.to_string(), "%m-%d-%y%H:%M").unwrap_or_default()
     }
 
     pub fn is_deleted(&self) -> bool {
         self.active_flag != MSG_ACTIVE
     }
 
-    pub fn read(file: &mut BufReader<File>, is_extended: bool) -> crate::Result<Self> {
+    pub fn read(mut file: impl Read, is_extended: bool) -> crate::Result<Self> {
         let data = &mut [0; Self::HEADER_SIZE];
         file.read_exact(data)?;
         let mut data = &data[..];
@@ -126,7 +122,7 @@ impl QWKMessage {
 
         let mut text = vec![0; 128 * ((num_blocks as usize).saturating_sub(1))];
         file.read_exact(&mut text)?;
-        let mut text = crate::pcboard::convert_msg(&text);
+        let mut text: BString = crate::pcboard::convert_msg(&text);
         let mut to_field = to_field;
         let mut from_field = from_field;
         let mut subj_field = subj_field;
@@ -165,58 +161,77 @@ impl QWKMessage {
         })
     }
 
-    pub fn write(&self, file: &mut BufWriter<File>, is_extended: bool) -> crate::Result<()> {
-        file.write_all(&[self.status])?;
-        file.write_all(format!("{:0}", self.msg_number).as_bytes())?;
-        file.write_all(&self.date_time)?;
+    pub fn write(&self, mut file: impl Write, is_extended: bool) -> crate::Result<usize> {
+        let mut header: Vec<u8> = Vec::with_capacity(128);
+        header.push(self.status);
+        header.extend(format!("{:<7}", self.msg_number).as_bytes());
+        header.extend(self.date_time.to_vec());
 
         let mut to_vec = self.to.to_vec();
         to_vec.resize(25, b' ');
-        file.write_all(&to_vec)?;
+        header.extend(&to_vec);
 
         let mut from_vec = self.from.to_vec();
         from_vec.resize(25, b' ');
-        file.write_all(&from_vec)?;
+        header.extend(&from_vec);
 
         let mut subj_vec = self.subj.to_vec();
         subj_vec.resize(25, b' ');
-        file.write_all(&subj_vec)?;
+        header.extend(&subj_vec);
 
         let mut password_vec = self.password.to_vec();
         password_vec.resize(12, b' ');
-        file.write_all(&password_vec)?;
-        file.write_all(format!("{:8}", self.ref_msg_number).as_bytes())?;
-        file.write_all(format!("{:6}", self.text.len() / 128 + 1).as_bytes())?;
-        file.write_all(&[self.active_flag])?;
-        file.write_all(&self.conference_number.to_le_bytes())?;
-        file.write_all(&self.logical_message_number.to_le_bytes())?;
-        file.write_all(&[self.net_tag])?;
+        header.extend(&password_vec);
+        header.extend(format!("{:<8}", self.ref_msg_number).as_bytes());
+        let data = self.generate_data_block(is_extended);
+        let num_blocks = data.len() / 128 + 1;
+        header.extend(format!("{:<6}", num_blocks).as_bytes());
+        header.extend(&[self.active_flag]);
+        header.extend(&self.conference_number.to_le_bytes());
+        header.extend(&self.logical_message_number.to_le_bytes());
+        header.extend(&[self.net_tag]);
+
+        file.write_all(&header)?;
+        file.write_all(&data)?;
+        Ok(num_blocks)
+    }
+
+    fn generate_data_block(&self, is_extended: bool) -> Vec<u8> {
+        let mut res = Vec::new();
 
         if is_extended {
             if self.to.len() > 25 {
-                file.write_all(b"To: ")?;
-                file.write_all(&self.to)?;
-                file.write_all(PCB_TXT_EOL_PTR)?;
+                res.extend(b"To: ");
+                res.extend_from_slice(&self.to);
+                res.extend(PCB_TXT_EOL_PTR);
             }
             if self.from.len() > 25 {
-                file.write_all(b"From: ")?;
-                file.write_all(&self.from)?;
-                file.write_all(PCB_TXT_EOL_PTR)?;
+                res.extend(b"From: ");
+                res.extend_from_slice(&self.from);
+                res.extend(PCB_TXT_EOL_PTR);
             }
 
             if self.subj.len() > 25 {
-                file.write_all(b"Subject: ")?;
-                file.write_all(&self.subj)?;
-                file.write_all(PCB_TXT_EOL_PTR)?;
+                res.extend(b"Subject: ");
+                res.extend_from_slice(&self.subj);
+                res.extend(PCB_TXT_EOL_PTR);
             }
             // According to the spec after the kludge a blank line should be put.
             if self.to.len() > 25 || self.from.len() > 25 || self.subj.len() > 25 {
-                file.write_all(PCB_TXT_EOL_PTR)?;
+                res.extend(PCB_TXT_EOL_PTR);
             }
         }
-
-        file.write_all(&self.text.to_vec().replace([b'\n'], PCB_TXT_EOL_PTR))?;
-        Ok(())
+        for b in self.text.iter() {
+            if *b == b'\n' {
+                res.extend(PCB_TXT_EOL_PTR);
+            } else {
+                res.push(*b);
+            }
+        }
+        if res.len() % 128 != 0 {
+            res.resize(res.len() + 128 - res.len() % 128, b' ');
+        }
+        res
     }
 }
 

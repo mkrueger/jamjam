@@ -32,10 +32,7 @@ fn test_get_text() {
     let base = JamMessageBase::open("data/jam/general").unwrap();
     let header = base.read_header(4).unwrap();
     let txt = base.read_msg_text(&header).unwrap();
-    assert_eq!(
-        txt,
-        "private message\r\r... Multitasking: Reading in the bathroom\r"
-    );
+    assert_eq!(txt, "private message\r\r... Multitasking: Reading in the bathroom\r");
 }
 
 #[test]
@@ -57,7 +54,6 @@ fn test_iter_mystic() {
     let base = JamMessageBase::open("data/jam/general").unwrap();
     for msg in base.iter() {
         let msg = msg.unwrap();
-        println!("{} {} {}", msg.reply1st, msg.reply_to, msg.replynext);
         for sub in msg.sub_fields.iter() {
             if *sub.get_type() == SubfieldType::MsgID {
                 assert_eq!(JamMessageBase::get_crc(sub.get_string()), msg.msgid_crc);

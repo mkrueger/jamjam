@@ -1,10 +1,10 @@
 use bstr::BString;
 use chrono::{Datelike, Local, NaiveTime};
 
-use super::{convert_pcboard_str, PCBoardError};
+use super::{PCBoardError, convert_pcboard_str};
 use crate::{
     pcboard::{DATE_LEN, FROM_TO_LEN, PASSWORD_LEN, TIME_LEN},
-    util::basic_real::basicreal_to_u32,
+    util::basic_real::BasicReal,
 };
 use std::{
     fs::File,
@@ -54,7 +54,7 @@ pub struct PCBoardMessageHeader {
     /// Reply Time (HH:MM)
     pub reply_time: String,
 
-    /// 'R' == repliey, ' ' == no reply
+    /// 'R' == reply, ' ' == no reply
     pub reply_status: u8,
 
     /// 25 character "From" field
@@ -186,18 +186,19 @@ impl PCBoardMessageHeader {
 
         convert_u8!(status, data);
         convert_u32!(msg_number, data);
-        let msg_number = basicreal_to_u32(msg_number);
+        let msg_number = BasicReal::from(msg_number.to_le_bytes()).into();
         convert_u32!(ref_number, data);
-        let ref_number = basicreal_to_u32(ref_number);
+        let ref_number = BasicReal::from(ref_number.to_le_bytes()).into();
         convert_u8!(num_blocks, data);
         convert_to_string!(date_time, data, DATE_LEN + TIME_LEN);
         convert_to_string!(to_field, data, FROM_TO_LEN);
         convert_u32!(reply_date, data);
-        let reply_date = basicreal_to_u32(reply_date);
+        let reply_date = BasicReal::from(reply_date.to_le_bytes()).into();
 
         convert_to_string!(reply_time, data, TIME_LEN);
         convert_u8!(reply_status, data);
         convert_to_string!(from_field, data, FROM_TO_LEN);
+
         convert_to_string!(subj_field, data, FROM_TO_LEN);
         convert_to_string!(password, data, PASSWORD_LEN);
         convert_u8!(active_flag, data);
@@ -262,6 +263,9 @@ const ORIGIN: &[u8; 7] = b"ORIGIN ";
 const REQRR: &[u8; 7] = b"REQRR  ";
 const ACKRR: &[u8; 7] = b"ACKRR  ";
 const ACKNAME: &[u8; 7] = b"ACKNAME";
+
+/// Date when this message is deleted automatically
+/// Note: All messages with packout date are public messages
 const PACKOUT: &[u8; 7] = b"PACKOUT";
 const TO2: &[u8; 7] = b"TO2    ";
 const FROM2: &[u8; 7] = b"FROM2  ";
