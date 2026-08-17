@@ -88,6 +88,12 @@ Every fallible call returns `jamjam::Result<T>`, which carries a `jamjam::Error`
 
 ``` cargo run --example read_jam data/jam/ra ```
 
+## Benchmarks
+
+`cargo bench` measures opening, reading, searching, appending, packing,
+reindexing and verifying a 2000 message base, plus header serialization.
+Pass a name to run part of it, for example `cargo bench -- read`.
+
 ## More formats are awaiting
 
 Maybe Squish next?

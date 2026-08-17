@@ -23,3 +23,12 @@ bstr = "1.10.0"
 [dev-dependencies]
 tempfile = "3.23.0"
 pretty_assertions = "1.4.1"
+criterion = "0.8.2"
+
+# The default libtest harness would otherwise swallow the criterion arguments.
+[lib]
+bench = false
+
+[[bench]]
+name = "jam"
+harness = false
