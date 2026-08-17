@@ -40,6 +40,24 @@ fn test_parse_control_dat() {
     assert_eq!(dat.welcome_screen, "HELLO");
     assert_eq!(dat.news_screen, "NEWS");
     assert_eq!(dat.logoff_screen, "SCRIPT0");
+    assert!(dat.extra_lines.is_empty());
+}
+
+#[test]
+fn test_control_dat_keeps_optional_trailing_lines() {
+    let mut packet = TEST_CONTROL_DAT.to_vec();
+    packet.extend(b"\n0\n2\nJANE DOE\nJane");
+    let dat = ControlDat::read(&packet).unwrap();
+    assert_eq!(
+        dat.extra_lines,
+        vec![
+            BString::from("0"),
+            BString::from("2"),
+            BString::from("JANE DOE"),
+            BString::from("Jane"),
+        ]
+    );
+    assert_eq!(dat.to_vec(), packet);
 }
 
 #[test]
@@ -63,6 +81,7 @@ fn test_generate_control_dat() {
         welcome_screen: BString::from("HELLO"),
         news_screen: BString::from("NEWS"),
         logoff_screen: BString::from("SCRIPT0"),
+        extra_lines: Vec::new(),
     };
 
     assert_eq!(dat.to_vec(), TEST_CONTROL_DAT);

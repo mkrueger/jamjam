@@ -345,3 +345,55 @@ fn test_messages_returns_only_live_indexed_headers_in_number_order() {
     assert_eq!(physical.len(), 4);
     assert!(physical[0].is_deleted());
 }
+
+#[test]
+fn test_read_message_returns_header_and_text() {
+    let dir = TempDir::new().unwrap();
+    let mut base = JamMessageBase::create(dir.path().join("full")).unwrap();
+    base.write_message(&message("hello", "all")).unwrap();
+
+    let stored = base.read_message(1).unwrap();
+    assert_eq!(stored.header().message_number, 1);
+    assert_eq!(stored.text(), "hello");
+    assert_eq!(stored.to().unwrap(), "all");
+
+    let all: Vec<_> = base.messages_full().collect::<jamjam::Result<_>>().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].text(), "hello");
+}
+
+#[test]
+fn test_search_to_and_msgid_helpers() {
+    let dir = TempDir::new().unwrap();
+    let mut base = JamMessageBase::create(dir.path().join("search")).unwrap();
+    let first = message("one", "alice").with_msg_id(BString::from("id-one"));
+    let second = message("two", "bob").with_msg_id(BString::from("id-two"));
+    base.write_message(&first).unwrap();
+    base.write_message(&second).unwrap();
+
+    assert_eq!(base.search_to(&BString::from("alice")).unwrap(), vec![1]);
+    assert_eq!(base.search_to(&BString::from("bob")).unwrap(), vec![2]);
+    assert_eq!(
+        base.find_by_msgid(&BString::from("id-two")).unwrap(),
+        vec![2]
+    );
+}
+
+#[test]
+fn test_oversized_subfield_is_rejected_on_write() {
+    let dir = TempDir::new().unwrap();
+    let mut base = JamMessageBase::create(dir.path().join("huge")).unwrap();
+    let mut header = JamMessageHeader::default();
+    header
+        .sub_fields
+        .push(jamjam::jam::msg_header::MessageSubfield::new(
+            SubfieldType::Subject,
+            BString::from(vec![b'x'; 65 * 1024]),
+        ));
+    let err = header.write(&mut Vec::new()).unwrap_err();
+    match err {
+        jamjam::Error::Jam(jamjam::jam::JamError::SubfieldTooLarge(_, _)) => {}
+        other => panic!("expected SubfieldTooLarge, got {other}"),
+    }
+    assert!(base.write_message(&message("ok", "all")).is_ok());
+}

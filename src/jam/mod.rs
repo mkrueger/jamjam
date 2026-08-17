@@ -73,6 +73,12 @@ pub enum JamError {
         "a shared message base lock cannot be upgraded, take the exclusive lock before reading"
     )]
     LockUpgrade,
+
+    #[error("subfield block of {0} bytes exceeds the {1} byte limit")]
+    SubfieldBlockTooLarge(u32, u32),
+
+    #[error("subfield of {0} bytes exceeds the {1} byte limit")]
+    SubfieldTooLarge(u32, u32),
 }
 
 /// JAM stores every file offset in a `ulong`, so a base cannot grow past 4 GB.
@@ -626,6 +632,9 @@ impl JamMessageBase {
     ///
     /// Empty and deleted slots are skipped. Physical JHR traversal, including
     /// retired records, is available in [`raw::physical_headers`].
+    ///
+    /// The walk is not locked. Take [`Self::lock_shared`] or
+    /// [`Self::read_transaction`] if a writer may be packing or appending.
     pub fn messages(&self) -> impl Iterator<Item = crate::Result<JamMessageHeader>> + use<'_> {
         (self.lowest_message_number()..=self.highest_message_number()).filter_map(move |number| {
             match self.read_header(number) {
@@ -634,6 +643,24 @@ impl JamMessageBase {
                 Err(err) => Some(Err(err)),
             }
         })
+    }
+
+    /// Live messages with their text, in message-number order.
+    ///
+    /// Like [`Self::messages`], this is not locked on its own.
+    pub fn messages_full(&self) -> impl Iterator<Item = crate::Result<JamMessage>> + use<'_> {
+        self.messages().map(|header| {
+            let header = header?;
+            let text = self.read_message_text(&header)?;
+            Ok(JamMessage::from_stored(header, text))
+        })
+    }
+
+    /// Reads a live message and the text that belongs to it.
+    pub fn read_message(&self, msg_number: u32) -> crate::Result<JamMessage> {
+        let header = self.read_header(msg_number)?;
+        let text = self.read_message_text(&header)?;
+        Ok(JamMessage::from_stored(header, text))
     }
 
     pub fn read_header(&self, msg_number: u32) -> crate::Result<JamMessageHeader> {
@@ -1040,6 +1067,27 @@ impl JamMessageBase {
         Ok(res)
     }
 
+    /// Message numbers addressed to the given recipient name.
+    pub fn search_to(&self, name: &BString) -> crate::Result<Vec<u32>> {
+        self.search_message_index(Self::crc(name))
+    }
+
+    /// Message numbers whose MSGID CRC matches `id`.
+    pub fn find_by_msgid(&self, id: &BString) -> crate::Result<Vec<u32>> {
+        self.find_by_msgid_crc(Self::crc(id))
+    }
+
+    /// Message numbers whose stored MSGID CRC matches `crc`.
+    pub fn find_by_msgid_crc(&self, crc: u32) -> crate::Result<Vec<u32>> {
+        self.messages()
+            .filter_map(|header| match header {
+                Ok(header) if header.msgid_crc == crc => Some(Ok(header.message_number)),
+                Ok(_) => None,
+                Err(err) => Some(Err(err)),
+            })
+            .collect()
+    }
+
     pub(crate) fn read_physical_headers(&self) -> crate::Result<Vec<JamMessageHeader>> {
         self.physical_headers()?.collect()
     }
@@ -1158,6 +1206,11 @@ impl JamMessage {
         self.header.msgid_crc
     }
 
+    /// Rebuilds a message from a stored header and its text.
+    pub fn from_stored(header: JamMessageHeader, text: BString) -> Self {
+        Self { header, text }
+    }
+
     /// Creates a new message with an unique message id
     pub fn new(aka: &EchomailAddress) -> Self {
         let now = SystemTime::now();
@@ -1273,6 +1326,10 @@ impl JamMessage {
 
     pub fn text(&self) -> &BString {
         &self.text
+    }
+
+    pub fn header(&self) -> &JamMessageHeader {
+        &self.header
     }
 
     pub(crate) fn create_jam_header(&self) -> JamMessageHeader {

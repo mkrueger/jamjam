@@ -60,6 +60,13 @@ pub struct ControlDat {
     pub news_screen: bstr::BString,
     /// Log off screen
     pub logoff_screen: bstr::BString,
+
+    /// Optional lines some mail doors append after the three screen names.
+    ///
+    /// MarkMail and a few others send user details here. The format is not
+    /// part of the original QWK specification, so the lines are kept as they
+    /// were rather than interpreted.
+    pub extra_lines: Vec<BString>,
 }
 const EOL: &[u8; 1] = b"\n";
 
@@ -118,39 +125,7 @@ impl ControlDat {
         let welcome_screen = BString::from(lines.next().unwrap_or_default());
         let news_screen = BString::from(lines.next().unwrap_or_default());
         let logoff_screen = BString::from(lines.next().unwrap_or_default());
-        // TODO: parse optional data?
-        /*
-        Some mail doors, such as MarkMail, will send additional information
-        about the user from here on.
-
-        0                             ?
-        25                            Number of lines that follow this one
-        JANE DOE                      User name in uppercase
-        Jane                          User first name in mixed case
-        NEW YORK, NY                  User city information
-        718 555-1212                  User data phone number
-        718 555-1212                  User home phone number
-        108                           Security level
-        00-00-00                      Expiration date
-        01-01-91                      Last log on date
-        23:59                         Last log on time
-        999                           Log on count
-        0                             Current conference number on the BBS
-        0                             Total KB downloaded
-        999                           Download count
-        0                             Total KB uploaded
-        999                           Upload count
-        999                           Minutes per day
-        999                           Minutes remaining today
-        999                           Minutes used this call
-        32767                         Max. download KB per day
-        32767                         Remaining KB today
-        0                             KB downloaded today
-        23:59                         Current time on BBS
-        01-01-91                      Current date on BBS
-        My BBS                        BBS network tag-line
-        0                             ?
-        */
+        let extra_lines = lines.map(BString::from).collect();
         Ok(Self {
             bbs_name,
             bbs_city_and_state,
@@ -167,6 +142,7 @@ impl ControlDat {
             welcome_screen,
             news_screen,
             logoff_screen,
+            extra_lines,
         })
     }
 
@@ -207,6 +183,10 @@ impl ControlDat {
         s.extend(self.news_screen.bytes());
         s.extend(EOL);
         s.extend(self.logoff_screen.bytes());
+        for line in &self.extra_lines {
+            s.extend(EOL);
+            s.extend(line.bytes());
+        }
         s
     }
 }

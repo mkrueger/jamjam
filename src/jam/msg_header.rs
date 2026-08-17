@@ -3,7 +3,6 @@ use std::io::{Read, Write};
 use bstr::BString;
 
 use crate::{
-    Error,
     jam::{JAM_SIGNATURE, JamError},
     util::crc32::CRC_SEED,
 };
@@ -12,7 +11,10 @@ use super::{JamMessageBase, attributes};
 
 /// Longest subfield block accepted, the fixed header only reserves a u32 for it
 /// and the specification caps individual subfields far below this.
-const MAX_SUBFIELD_DATA: u32 = 1 << 20;
+pub(crate) const MAX_SUBFIELD_DATA: u32 = 1 << 20;
+
+/// Longest individual subfield accepted on write or read.
+pub(crate) const MAX_SUBFIELD_CONTENT: u32 = 64 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct JamMessageHeader {
@@ -229,27 +231,20 @@ impl JamMessageHeader {
         convert_u32!(password_crc, data);
         convert_u32!(cost, data);
 
-        let mut subfield_data = Vec::new();
         if subfield_data_len > MAX_SUBFIELD_DATA {
-            return Err(Error::jam(
-                0,
-                format!(
-                    "subfield block of {subfield_data_len} bytes exceeds the {MAX_SUBFIELD_DATA} byte limit"
-                ),
-            ));
+            return Err(
+                JamError::SubfieldBlockTooLarge(subfield_data_len, MAX_SUBFIELD_DATA).into(),
+            );
         }
+        let mut subfield_data = Vec::new();
         // Grow with the data instead of trusting the length field up front.
         file.by_ref()
             .take(subfield_data_len as u64)
             .read_to_end(&mut subfield_data)?;
         if subfield_data.len() != subfield_data_len as usize {
-            return Err(Error::jam(
-                0,
-                format!(
-                    "subfield block truncated, expected {subfield_data_len} bytes, got {}",
-                    subfield_data.len()
-                ),
-            ));
+            return Err(
+                JamError::InvalidSubfieldLength(subfield_data_len, subfield_data.len()).into(),
+            );
         }
 
         let mut sub_fields = Vec::new();
@@ -286,12 +281,23 @@ impl JamMessageHeader {
         file.write_all(&u16::to_le_bytes(1))?;
         // reserved_word
         file.write_all(&u16::to_le_bytes(0))?;
-        let subfield_data_len = self
-            .sub_fields
-            .iter()
-            .map(|sf| 8 + sf.content.len())
-            .sum::<usize>();
-        file.write_all(&u32::to_le_bytes(subfield_data_len as u32))?;
+        let mut subfield_data_len = 0u32;
+        for sub_field in &self.sub_fields {
+            let content_len = u32::try_from(sub_field.content.len())
+                .map_err(|_| JamError::SubfieldTooLarge(u32::MAX, MAX_SUBFIELD_CONTENT))?;
+            if content_len > MAX_SUBFIELD_CONTENT {
+                return Err(JamError::SubfieldTooLarge(content_len, MAX_SUBFIELD_CONTENT).into());
+            }
+            subfield_data_len = subfield_data_len
+                .checked_add(8 + content_len)
+                .ok_or(JamError::SubfieldBlockTooLarge(u32::MAX, MAX_SUBFIELD_DATA))?;
+        }
+        if subfield_data_len > MAX_SUBFIELD_DATA {
+            return Err(
+                JamError::SubfieldBlockTooLarge(subfield_data_len, MAX_SUBFIELD_DATA).into(),
+            );
+        }
+        file.write_all(&subfield_data_len.to_le_bytes())?;
         file.write_all(&self.times_read.to_le_bytes())?;
         file.write_all(&self.msgid_crc.to_le_bytes())?;
         file.write_all(&self.reply_crc.to_le_bytes())?;
@@ -578,6 +584,9 @@ impl MessageSubfield {
         }
         convert_u32!(id, data);
         convert_u32!(data_len, data);
+        if data_len > MAX_SUBFIELD_CONTENT {
+            return Err(JamError::SubfieldTooLarge(data_len, MAX_SUBFIELD_CONTENT).into());
+        }
         *idx += 8;
         let Some(end) = idx.checked_add(data_len as usize) else {
             return Err(JamError::InvalidSubfieldLength(data_len, subfield_data.len()).into());

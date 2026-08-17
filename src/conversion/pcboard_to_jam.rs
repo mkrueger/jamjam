@@ -118,28 +118,7 @@ pub fn convert_pcboard_to_jam(
         cur_msg += 1;
     }
 
-    // Setting reply information for each message.
-    // TODO: reply_next
-    // Does it even make any sense at all?
-    let mut reply_next = Vec::new();
-    for (i, msg) in &mut jam_messages {
-        let reply_to = msg.reply_to();
-        if reply_to != 0
-            && reply_to != *i
-            && let Some(crc) = message_ids.get_mut(&reply_to)
-        {
-            msg.set_reply_crc(*crc);
-            reply_next.push((reply_to, *i));
-        }
-    }
-
-    for (reply_to, rep1st) in reply_next {
-        if let Some(msg) = jam_messages.get_mut(&reply_to)
-            && msg.reply_first() == 0
-        {
-            msg.set_reply_first(rep1st);
-        }
-    }
+    wire_reply_links(&mut jam_messages, &message_ids);
 
     // write jam message base
     let mut jam_base = JamMessageBase::create(jam_dest_path)?;
@@ -148,4 +127,36 @@ pub fn convert_pcboard_to_jam(
     }
     jam_base.write_jhr_header()?;
     Ok(())
+}
+
+/// Sets reply_crc, reply_first and reply_next from the converted numbers.
+pub fn wire_reply_links(
+    jam_messages: &mut BTreeMap<u32, JamMessage>,
+    message_ids: &HashMap<u32, u32>,
+) {
+    let mut replies: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (i, msg) in jam_messages.iter_mut() {
+        let reply_to = msg.reply_to();
+        if reply_to != 0
+            && reply_to != *i
+            && let Some(crc) = message_ids.get(&reply_to)
+        {
+            msg.set_reply_crc(*crc);
+            replies.entry(reply_to).or_default().push(*i);
+        }
+    }
+
+    for (parent, children) in replies {
+        let Some(first) = children.first().copied() else {
+            continue;
+        };
+        if let Some(msg) = jam_messages.get_mut(&parent) {
+            msg.set_reply_first(first);
+        }
+        for window in children.windows(2) {
+            if let Some(msg) = jam_messages.get_mut(&window[0]) {
+                msg.set_reply_next(window[1]);
+            }
+        }
+    }
 }

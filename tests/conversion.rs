@@ -81,3 +81,29 @@ fn test_qwk_conversion_numbers_messages_from_the_base() {
     assert_eq!(jam.lowest_message_number(), 1);
     assert_eq!(jam.highest_message_number(), mail.len() as u32);
 }
+
+#[test]
+fn test_reply_links_set_first_and_next() {
+    use jamjam::conversion::pcboard_to_jam::wire_reply_links;
+    use jamjam::jam::JamMessage;
+    use std::collections::{BTreeMap, HashMap};
+
+    let aka = EchomailAddress::default();
+    let parent = JamMessage::new(&aka).with_from(BString::from("sysop"));
+    let first = JamMessage::new(&aka)
+        .with_from(BString::from("alice"))
+        .with_reply_to(1);
+    let second = JamMessage::new(&aka)
+        .with_from(BString::from("bob"))
+        .with_reply_to(1);
+    let parent_crc = parent.msgid_crc();
+    let mut messages = BTreeMap::from([(1, parent), (2, first), (3, second)]);
+    let ids = HashMap::from([(1, parent_crc)]);
+
+    wire_reply_links(&mut messages, &ids);
+
+    assert_eq!(messages[&1].reply_first(), 2);
+    assert_eq!(messages[&2].reply_next(), 3);
+    assert_eq!(messages[&2].reply_to(), 1);
+    assert_eq!(messages[&3].reply_to(), 1);
+}
