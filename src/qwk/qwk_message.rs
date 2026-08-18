@@ -3,16 +3,6 @@ use bstr::{BString, ByteSlice};
 use crate::{Error, pcboard::PCB_TXT_EOL_PTR, qwk::QwkError};
 use std::io::{Read, Write};
 
-pub enum MessageType {
-    Public,
-    PrivateReadNotIntended,
-    PrivateRead,
-    CommentToSysop,
-    SenderPassword,
-    GroupPassword,
-    GroupPasswordProtectedToAll,
-}
-
 #[derive(Clone, Debug)]
 pub struct QwkMessage {
     /// Message status flags

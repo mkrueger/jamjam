@@ -324,11 +324,8 @@ fn test_interrupted_renumber_finishes_lastread_on_open() {
     .unwrap();
     let old_lastread = std::fs::read(path.with_extension("jlr")).unwrap();
 
-    base.pack(&PackOptions {
-        renumber_from: Some(500),
-        ..Default::default()
-    })
-    .unwrap();
+    base.pack(&PackOptions::default().with_renumber_from(500))
+        .unwrap();
     let remapped_lastread = std::fs::read(path.with_extension("jlr")).unwrap();
     drop(base);
 

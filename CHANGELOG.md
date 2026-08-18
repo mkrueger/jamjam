@@ -9,6 +9,8 @@
 - Removed the message-number argument from `JamMessage::new`; message bases now allocate numbers.
 - Moved physical JAM traversal and direct header mutation under `jam::raw`.
 - Added `ControlDat::extra_lines` for optional QWK trailing data.
+- Marked the error enums, `Problem`, the verify, repair and pack reports and `PackOptions` as `#[non_exhaustive]`, so later additions no longer break callers. Build pack criteria with `PackOptions::default().with_renumber_from(500)`.
+- Removed the unused `MessageType` enums from the PCBoard and QWK modules.
 
 ### Added
 

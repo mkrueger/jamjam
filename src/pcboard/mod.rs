@@ -25,6 +25,7 @@ const DATE_LEN: usize = 8;
 const TIME_LEN: usize = 5;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum PCBoardError {
     #[error("Message number {0} out of range. Valid range is {1}..={2}")]
     MessageNumberOutOfRange(u32, u32, u32),

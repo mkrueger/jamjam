@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// The message base format a low level parse error originated from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     Jam,
     PCBoard,
@@ -21,6 +22,7 @@ impl fmt::Display for Format {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

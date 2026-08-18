@@ -139,11 +139,8 @@ fn test_pack_renumber_remaps_last_read_pointers() {
     base.write_last_read(&storage(1, 1, 3)).unwrap();
     base.write_last_read(&storage(2, 2, 2)).unwrap();
 
-    base.pack(&PackOptions {
-        renumber_from: Some(500),
-        ..Default::default()
-    })
-    .unwrap();
+    base.pack(&PackOptions::default().with_renumber_from(500))
+        .unwrap();
 
     let first = base.find_last_read(1, 1).unwrap().unwrap();
     let second = base.find_last_read(2, 2).unwrap().unwrap();

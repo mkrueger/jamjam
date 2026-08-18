@@ -194,11 +194,8 @@ fn test_pack_renumber_round_trip_keeps_live_message_order() {
         .filter(|number| number % 3 != 0)
         .map(|number| format!("message-{number}"))
         .collect();
-    base.pack(&PackOptions {
-        renumber_from: Some(500),
-        ..Default::default()
-    })
-    .unwrap();
+    base.pack(&PackOptions::default().with_renumber_from(500))
+        .unwrap();
     drop(base);
 
     let base = JamMessageBase::open(path).unwrap();

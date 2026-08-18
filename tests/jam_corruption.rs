@@ -154,10 +154,7 @@ fn test_renumber_rejects_truncated_lastread_before_commit() {
     let messages_before = snapshot(&path);
     let lastread_before = std::fs::read(path.with_extension("jlr")).unwrap();
 
-    let result = base.pack(&PackOptions {
-        renumber_from: Some(500),
-        ..Default::default()
-    });
+    let result = base.pack(&PackOptions::default().with_renumber_from(500));
 
     assert!(result.is_err());
     assert_unchanged(&path, &messages_before);

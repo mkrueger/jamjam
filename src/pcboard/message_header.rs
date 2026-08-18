@@ -8,14 +8,6 @@ use crate::{
 };
 use std::io::Read;
 
-pub enum MessageType {
-    Public,
-    Receiver,
-    Comment,
-    SenderPassword,
-    GroupPassword,
-}
-
 #[derive(Clone, Debug)]
 pub struct PCBoardMessageHeader {
     /// Message status flags
@@ -107,16 +99,6 @@ pub const NOT_REPLIED: u8 = b' ';
 
 impl PCBoardMessageHeader {
     pub const HEADER_SIZE: usize = 128;
-    /*
-    pub get_status(&self) -> MessageType {
-        match self.status {
-            b'~' | b'*' => MessageStatus::PrivateUnread,
-            b'`' | b'+' => MessageStatus::PrivateRead,
-            b' ' => MessageStatus::PublicRead,
-            b'-' => MessageStatus::PublicUnread,
-            _ => MessageStatus::Unknown,
-        }
-    }*/
 
     /// Returns the date and time of the message
     ///
@@ -232,6 +214,7 @@ impl PCBoardMessageHeader {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ExtendedHeaderInformation {
     To,
     From,

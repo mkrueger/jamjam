@@ -16,6 +16,7 @@ use super::{
 
 /// Something that does not match what the format guarantees.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Problem {
     /// The .JDX file does not consist of whole records.
     IndexFileTruncated { bytes: u64 },
@@ -149,6 +150,7 @@ impl fmt::Display for Problem {
 
 /// What [`JamMessageBase::verify`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReport {
     /// Records in the .JDX file, empty slots included.
     pub index_records: u32,
@@ -187,6 +189,7 @@ impl fmt::Display for VerifyReport {
 
 /// What [`JamMessageBase::repair`] changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RepairReport {
     /// The state the base was in before the repair.
     pub before: VerifyReport,

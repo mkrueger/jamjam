@@ -1,6 +1,6 @@
 use bstr::BString;
 use chrono::{TimeZone, Utc};
-use jamjam::jam::pack::{PackOptions, PackReport};
+use jamjam::jam::pack::PackOptions;
 use jamjam::jam::{JamMessage, JamMessageBase, attributes, raw};
 use jamjam::util::echomail::EchomailAddress;
 use pretty_assertions::assert_eq;
@@ -37,16 +37,11 @@ fn test_pack_removes_deleted_messages() {
 
     let report = base.pack(&PackOptions::default()).unwrap();
 
-    assert_eq!(
-        report,
-        PackReport {
-            before: 4,
-            removed: 1,
-            kept: 3,
-            low_message_number: 1,
-            high_message_number: 4
-        }
-    );
+    assert_eq!(report.before, 4);
+    assert_eq!(report.removed, 1);
+    assert_eq!(report.kept, 3);
+    assert_eq!(report.low_message_number, 1);
+    assert_eq!(report.high_message_number, 4);
     assert_eq!(texts(&base), vec!["one", "three", "four"]);
 }
 
@@ -80,22 +75,14 @@ fn test_pack_renumbers() {
     base.delete_message(1).unwrap();
 
     let report = base
-        .pack(&PackOptions {
-            renumber_from: Some(1),
-            ..Default::default()
-        })
+        .pack(&PackOptions::default().with_renumber_from(1))
         .unwrap();
 
-    assert_eq!(
-        report,
-        PackReport {
-            before: 4,
-            removed: 1,
-            kept: 3,
-            low_message_number: 1,
-            high_message_number: 3
-        }
-    );
+    assert_eq!(report.before, 4);
+    assert_eq!(report.removed, 1);
+    assert_eq!(report.kept, 3);
+    assert_eq!(report.low_message_number, 1);
+    assert_eq!(report.high_message_number, 3);
     assert_eq!(texts(&base), vec!["two", "three", "four"]);
     assert_eq!(base.read_header(1).unwrap().message_number, 1);
 
@@ -108,11 +95,8 @@ fn test_pack_renumbers_from_a_new_low_number() {
     let dir = TempDir::new().unwrap();
     let mut base = base(&dir);
 
-    base.pack(&PackOptions {
-        renumber_from: Some(500),
-        ..Default::default()
-    })
-    .unwrap();
+    base.pack(&PackOptions::default().with_renumber_from(500))
+        .unwrap();
 
     assert_eq!(base.lowest_message_number(), 500);
     assert_eq!(base.highest_message_number(), 503);
@@ -135,10 +119,10 @@ fn test_pack_purges_by_date() {
     base.write_message(&msg).unwrap();
 
     let report = base
-        .pack(&PackOptions {
-            purge_before: Some(Utc.with_ymd_and_hms(1992, 1, 1, 0, 0, 0).unwrap()),
-            ..Default::default()
-        })
+        .pack(
+            &PackOptions::default()
+                .with_purge_before(Utc.with_ymd_and_hms(1992, 1, 1, 0, 0, 0).unwrap()),
+        )
         .unwrap();
 
     assert_eq!(report.removed, 4);
@@ -160,10 +144,7 @@ fn test_pack_purges_received_private_messages() {
     raw::set_attributes(&mut base, 3, attributes::MSG_PRIVATE, 0).unwrap();
 
     let report = base
-        .pack(&PackOptions {
-            purge_received_private: true,
-            ..Default::default()
-        })
+        .pack(&PackOptions::default().with_purge_received_private(true))
         .unwrap();
 
     assert_eq!(report.removed, 1);
@@ -226,10 +207,7 @@ fn test_reindex_rebuilds_a_lost_index() {
     std::fs::write(dir.path().join("packing.jdx"), []).unwrap();
 
     let report = base
-        .pack(&PackOptions {
-            index_only: true,
-            ..Default::default()
-        })
+        .pack(&PackOptions::default().with_index_only(true))
         .unwrap();
 
     assert_eq!(report.kept, 4);
@@ -250,11 +228,8 @@ fn test_reindex_keeps_deleted_messages() {
     base.delete_message(2).unwrap();
     std::fs::write(dir.path().join("packing.jdx"), []).unwrap();
 
-    base.pack(&PackOptions {
-        index_only: true,
-        ..Default::default()
-    })
-    .unwrap();
+    base.pack(&PackOptions::default().with_index_only(true))
+        .unwrap();
     base.restore_message(2).unwrap();
 
     assert_eq!(texts(&base), vec!["one", "two", "three", "four"]);

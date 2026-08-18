@@ -38,6 +38,18 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The version promised by rust-version in Cargo.toml.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --all-targets --all-features
+
   # Coverage guided fuzzing needs nightly, so it runs on a schedule instead of
   # gating every pull request. The seeded suite in tests/fuzz.rs covers those.
   fuzz:

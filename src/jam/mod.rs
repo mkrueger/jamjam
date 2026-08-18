@@ -26,6 +26,7 @@ pub mod raw;
 pub mod verify;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum JamError {
     #[error("Invalid header signature (needs to start with 'JAM\\0')")]
     InvalidHeaderSignature,

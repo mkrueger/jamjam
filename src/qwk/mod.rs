@@ -18,6 +18,7 @@ pub mod control;
 pub mod qwk_message;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum QwkError {
     #[error("Invalid conference number ({0})")]
     CantParseConferenceNumber(BString),

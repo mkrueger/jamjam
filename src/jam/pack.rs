@@ -20,6 +20,7 @@ pub(crate) const EMPTY_SLOT: u32 = 0xFFFF_FFFF;
 /// The criteria PCBPack was driven with, which is what the sysop is asked for
 /// when packing a conference from the board.
 #[derive(Default, Clone)]
+#[non_exhaustive]
 pub struct PackOptions {
     /// Throw the index away and rebuild it from the headers (`/INDEX`). No
     /// message is removed and the header and text files are left alone.
@@ -36,7 +37,30 @@ pub struct PackOptions {
     pub renumber_from: Option<u32>,
 }
 
+impl PackOptions {
+    pub fn with_index_only(mut self, index_only: bool) -> Self {
+        self.index_only = index_only;
+        self
+    }
+
+    pub fn with_purge_before(mut self, purge_before: DateTime<Utc>) -> Self {
+        self.purge_before = Some(purge_before);
+        self
+    }
+
+    pub fn with_purge_received_private(mut self, purge_received_private: bool) -> Self {
+        self.purge_received_private = purge_received_private;
+        self
+    }
+
+    pub fn with_renumber_from(mut self, renumber_from: u32) -> Self {
+        self.renumber_from = Some(renumber_from);
+        self
+    }
+}
+
 #[derive(Default, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackReport {
     /// Messages the base held before packing.
     pub before: u32,

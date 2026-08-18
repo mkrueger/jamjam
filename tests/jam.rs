@@ -165,11 +165,8 @@ fn test_search_index_follows_the_base_message_number() {
     for to in ["alice", "bob"] {
         base.write_message(&message(to, to)).unwrap();
     }
-    base.pack(&PackOptions {
-        renumber_from: Some(500),
-        ..Default::default()
-    })
-    .unwrap();
+    base.pack(&PackOptions::default().with_renumber_from(500))
+        .unwrap();
 
     let crc = JamMessageBase::crc(&BString::from("bob"));
     assert_eq!(base.search_message_index(crc).unwrap(), vec![501]);
