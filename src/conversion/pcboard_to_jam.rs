@@ -98,7 +98,9 @@ pub fn convert_pcboard_to_jam(
             }
         }
 
-        let new_msg = JamMessage::new(aka)
+        let new_msg = sub_fields
+            .into_iter()
+            .fold(JamMessage::new(aka), JamMessage::with_sub_field)
             .with_reply_to(*number_map.get(&msg.header.reply_to).unwrap_or(&0))
             .with_date_time(time.and_utc())
             .with_text(to_utf8(&msg.text).into())

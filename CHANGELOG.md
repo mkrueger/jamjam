@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- PCBoard `lock()` and `unlock()` no longer overwrite the BASIC real message counters in the base header; only the lock status is written.
+- `PCBoardMessageBase::read_index` reports a truncated or unreadable index instead of silently returning the records before the damage.
+- PCBoard to JAM conversion keeps `ATTACH` extended headers as JAM file attachment subfields.
+- QWK to JAM conversion sets `reply_next`, so every reply to a message is reachable through the reply chain.
+
 ## 0.3.0 - 2026-08-18
 
 ### Breaking

@@ -39,6 +39,38 @@ fn test_pcboard_to_jam_keeps_the_fields() {
     }
 }
 
+#[test]
+fn test_pcboard_to_jam_keeps_attachments() {
+    use jamjam::jam::msg_header::SubfieldType;
+
+    let dir = TempDir::new().unwrap();
+    // Base header plus the first message header, turned into a two block
+    // message whose body is a single ATTACH extended header.
+    let mut data = std::fs::read("data/pcboard/test").unwrap()[..256].to_vec();
+    data[128 + 9] = 2; // number of blocks
+    data[128 + 126] = 16; // extended status: ATTACH
+    let mut body = [b' '; 128];
+    body[..10].copy_from_slice(b"\xff@ATTACH :");
+    body[10..18].copy_from_slice(b"FILE.ZIP");
+    body[70] = b'N';
+    data.extend(body);
+    let source = dir.path().join("attached");
+    std::fs::write(&source, data).unwrap();
+
+    let converted = dir.path().join("jambase");
+    convert_pcboard_to_jam(&source, &converted, &EchomailAddress::default()).unwrap();
+
+    let jam = JamMessageBase::open(&converted).unwrap();
+    let header = jam.read_header(1).unwrap();
+    let attachments: Vec<_> = header
+        .sub_fields
+        .iter()
+        .filter(|field| field.field_type() == SubfieldType::EnclFile)
+        .map(|field| field.content().clone())
+        .collect();
+    assert_eq!(attachments, vec![BString::from("FILE.ZIP")]);
+}
+
 fn qwk_mail() -> Vec<QwkMessage> {
     let msg_base = QwkMessageBase::open("data/qwk", true).unwrap();
     msg_base
@@ -80,6 +112,34 @@ fn test_qwk_conversion_numbers_messages_from_the_base() {
 
     assert_eq!(jam.lowest_message_number(), 1);
     assert_eq!(jam.highest_message_number(), mail.len() as u32);
+}
+
+#[test]
+fn test_qwk_conversion_chains_sibling_replies() {
+    let dir = TempDir::new().unwrap();
+    let sample = qwk_mail().remove(0);
+    let mail: Vec<QwkMessage> = (1..=3)
+        .map(|number| {
+            let mut msg = sample.clone();
+            msg.msg_number = number;
+            msg.ref_msg_number = if number == 1 { 0 } else { 1 };
+            msg
+        })
+        .collect();
+
+    let mut jam = JamMessageBase::create(dir.path().join("converted")).unwrap();
+    convert_qwk_to_jam(&mail, &mut jam).unwrap();
+
+    let parent = jam.read_header(1).unwrap();
+    let first = jam.read_header(2).unwrap();
+    let second = jam.read_header(3).unwrap();
+    assert_eq!(parent.reply_first, 2);
+    assert_eq!(first.reply_to, 1);
+    assert_eq!(first.reply_next, 3);
+    assert_eq!(second.reply_to, 1);
+    assert_eq!(second.reply_next, 0);
+    assert_eq!(first.reply_crc, second.reply_crc);
+    assert_ne!(first.reply_crc, 0);
 }
 
 #[test]

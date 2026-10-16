@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufWriter, Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
 };
 
 use crate::util::basic_real::BasicReal;
@@ -50,14 +50,14 @@ impl PCBoardMessageBaseHeader {
         })
     }
 
-    pub(crate) fn write_header_to(&self, file: &mut BufWriter<File>) -> crate::Result<()> {
-        let mut data = Vec::with_capacity(Self::HEADER_SIZE);
-        data.extend(&self.high_msg_num.to_le_bytes());
-        data.extend(&self.low_msg_num.to_le_bytes());
-        data.extend(&self.active_msgs.to_le_bytes());
-        data.extend(&self.callers.to_le_bytes());
-        data.extend(&self.lock_status);
-        file.write_all(&data)?;
+    /// Offset of the lock status, behind the four BASIC real counters.
+    const LOCK_STATUS_OFFSET: u64 = 4 * 4;
+
+    /// Rewrites only the lock status, so the counters keep their on-disk encoding.
+    pub(crate) fn write_lock_status_to(&self, file: &mut File) -> crate::Result<()> {
+        file.seek(SeekFrom::Start(Self::LOCK_STATUS_OFFSET))?;
+        file.write_all(&self.lock_status)?;
+        file.flush()?;
         Ok(())
     }
 

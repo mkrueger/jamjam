@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Seek},
+    io::{BufReader, Read, Seek},
     path::{Path, PathBuf},
 };
 
@@ -176,10 +176,8 @@ impl PCBoardMessageBase {
     }
 
     fn write_base_header(&self) -> crate::Result<()> {
-        let header_file = OpenOptions::new().write(true).open(&self.file_name)?;
-        let mut writer = BufWriter::new(header_file);
-        self.header_info.write_header_to(&mut writer)?;
-        Ok(())
+        let mut header_file = OpenOptions::new().write(true).open(&self.file_name)?;
+        self.header_info.write_lock_status_to(&mut header_file)
     }
 
     pub fn is_locked(&mut self) -> crate::Result<bool> {
@@ -256,14 +254,21 @@ impl PCBoardMessageBase {
     pub fn read_index(&self) -> crate::Result<Vec<PCBoardMessageIndex>> {
         let idx_file_name = self.file_name.with_extension(extensions::INDEX);
 
-        let mut res = Vec::new();
-        let mut reader = BufReader::new(File::open(idx_file_name)?);
-
-        while let Ok(header) = PCBoardMessageIndex::read(&mut reader) {
-            res.push(header);
+        let data = fs::read(idx_file_name)?;
+        let record_size = PCBoardMessageIndex::HEADER_SIZE;
+        if !data.len().is_multiple_of(record_size) {
+            return Err(Error::pcboard(
+                (data.len() - data.len() % record_size) as u64,
+                format!(
+                    "index size {} is not a multiple of {record_size}",
+                    data.len()
+                ),
+            ));
         }
 
-        Ok(res)
+        data.chunks_exact(record_size)
+            .map(|mut record| PCBoardMessageIndex::read(&mut record))
+            .collect()
     }
 
     /// Iterates the messages in the order they are stored in the message file.

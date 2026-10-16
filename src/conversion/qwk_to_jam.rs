@@ -3,7 +3,7 @@ use crate::{
     qwk::qwk_message::QwkMessage,
     util::{cp437::to_utf8, echomail::EchomailAddress},
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 fn jam_attributes(msg: &QwkMessage) -> u32 {
     let mut result = 0;
@@ -63,8 +63,7 @@ fn link_replies(
         .iter()
         .map(|(number, crc, _)| (*number, *crc))
         .collect();
-    let mut first_reply: HashMap<u32, u32> = HashMap::new();
-
+    let mut replies: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (number, _, ref_number) in written {
         let Some(reply_to) = number_map.get(ref_number) else {
             continue;
@@ -72,24 +71,40 @@ fn link_replies(
         if reply_to == number {
             continue;
         }
-        let Ok(mut header) = jam_base.read_header(*number) else {
-            continue;
-        };
-        header.reply_to = *reply_to;
-        if let Some(crc) = crc_by_number.get(reply_to) {
-            header.reply_crc = *crc;
-        }
-        raw::update_header(jam_base, *number, &header)?;
-        first_reply.entry(*reply_to).or_insert(*number);
+        replies.entry(*reply_to).or_default().push(*number);
     }
 
-    for (reply_to, first) in first_reply {
-        let Ok(mut header) = jam_base.read_header(reply_to) else {
+    for (reply_to, children) in &replies {
+        let mut linked = Vec::with_capacity(children.len());
+        for number in children {
+            let Ok(mut header) = jam_base.read_header(*number) else {
+                continue;
+            };
+            header.reply_to = *reply_to;
+            if let Some(crc) = crc_by_number.get(reply_to) {
+                header.reply_crc = *crc;
+            }
+            linked.push((*number, header));
+        }
+
+        // Chain the siblings in message order: parent -> first -> next -> ...
+        let next_numbers: Vec<u32> = linked.iter().skip(1).map(|(n, _)| *n).collect();
+        for (i, (number, header)) in linked.iter_mut().enumerate() {
+            if let Some(next) = next_numbers.get(i) {
+                header.reply_next = *next;
+            }
+            raw::update_header(jam_base, *number, header)?;
+        }
+
+        let Some((first, _)) = linked.first() else {
+            continue;
+        };
+        let Ok(mut header) = jam_base.read_header(*reply_to) else {
             continue;
         };
         if header.reply_first == 0 {
-            header.reply_first = first;
-            raw::update_header(jam_base, reply_to, &header)?;
+            header.reply_first = *first;
+            raw::update_header(jam_base, *reply_to, &header)?;
         }
     }
     Ok(())
